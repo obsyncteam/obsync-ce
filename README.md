@@ -32,7 +32,7 @@ cp .env.example .env
 Set values. Use real random strings and do not leave empty values:
 
 ```env
-OBSYNC_POSTGRES_PASSWORD=<random PostgreSQL password>
+OBSYNC_POSTGRES_PASSWORD=<random PostgreSQL password, at least 16 characters>
 OBSYNC_AUTH_TOKEN=<random token at least 32 characters long>
 OBSYNC_PORT=4444
 OBSYNC_STORAGE_QUOTA_BYTES=0
@@ -71,7 +71,7 @@ Expected ready response:
 
 | Variable | Required | Description |
 | --- | --- | --- |
-| `OBSYNC_POSTGRES_PASSWORD` | yes | PostgreSQL password used by the compose stack. |
+| `OBSYNC_POSTGRES_PASSWORD` | yes | PostgreSQL password used by the compose stack. Use a random value at least 16 characters long. |
 | `OBSYNC_AUTH_TOKEN` | yes | Shared plugin token. Use a long random value. |
 | `OBSYNC_PORT` | no | Host port mapped to `127.0.0.1:4444`. Default: `4444`. |
 | `OBSYNC_STORAGE_QUOTA_BYTES` | no | Storage quota in bytes. `0` disables the quota. |

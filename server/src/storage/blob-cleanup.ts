@@ -1,5 +1,6 @@
 import type { BlobStore } from "./blob-store.js";
 import type { SyncRepository } from "../sync/repository.js";
+import { withVaultMutationLock } from "../sync/vault-mutation-lock.js";
 
 const DEFAULT_ORPHAN_MARK_GRACE_MS = 60 * 60 * 1000;
 const DEFAULT_ORPHAN_DELETE_GRACE_MS = 60 * 60 * 1000;
@@ -34,8 +35,13 @@ export async function cleanupOrphanBlobs(input: {
 
   for (const candidate of candidates) {
     try {
-      await input.blobStore.delete(candidate.storageKey);
-      if (await input.repository.deleteOrphanBlobRef(candidate)) {
+      const removed = await withVaultMutationLock(candidate.vaultId, () => (
+        input.repository.deleteOrphanBlobRef(
+          candidate,
+          () => input.blobStore.delete(candidate.storageKey),
+        )
+      ));
+      if (removed) {
         deleted += 1;
       }
     } catch (error) {

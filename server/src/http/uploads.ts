@@ -12,9 +12,11 @@ import { z } from "zod";
 import type { ServerConfig } from "../config.js";
 import { blobStorageKey } from "../storage/blob-key.js";
 import type { BlobStore } from "../storage/blob-store.js";
-import { validateVaultPath } from "../sync/path-policy.js";
+import { MARKDOWN_VERSION_MAX_BYTES } from "../sync/history-limits.js";
+import { validateSyncVaultPath } from "../sync/path-policy.js";
 import type { SyncRepository } from "../sync/repository.js";
 import type { UploadChunkRecord, UploadSessionRecord } from "../sync/types.js";
+import { withVaultMutationLock } from "../sync/vault-mutation-lock.js";
 import { applyCorsHeaders, readJsonBody, sendJson } from "./json.js";
 import {
   endStream,
@@ -27,7 +29,6 @@ const DEFAULT_CHUNK_SIZE = 8 * 1024 * 1024;
 const MAX_CHUNK_SIZE = 32 * 1024 * 1024;
 const ACTIVE_UPLOAD_TTL_MS = 24 * 60 * 60 * 1000;
 const FINALIZED_UPLOAD_TTL_MS = 60 * 60 * 1000;
-const MARKDOWN_VERSION_MAX_BYTES = 1_000_000;
 const FINALIZE_WAIT_ATTEMPTS = 20;
 const FINALIZE_WAIT_DELAY_MS = 250;
 
@@ -35,12 +36,7 @@ const createUploadSchema = z.object({
   vaultId: z.string().min(1),
   deviceId: z.string().min(1),
   fileId: z.string().min(1),
-  path: z.string().min(1).transform((path) => (
-    validateVaultPath(path, {
-      allowObsidianConfig: true,
-      allowObsidianPlugins: true,
-    })
-  )),
+  path: z.string().min(1).transform(validateSyncVaultPath),
   kind: z.enum(["markdown", "blob"]),
   sizeBytes: z.number().int().nonnegative(),
   mtimeMs: z.number().int().nonnegative().optional(),
@@ -316,7 +312,6 @@ async function finalizeUpload(
   expectedHash?: string,
 ) {
   let finalized = false;
-  let storedBlobKey: string | undefined;
   const claimed = await deps.repository.markUploadSessionFinalizing(session.uploadId);
   if (!claimed) {
     return await waitForFinalizedUpload(deps.repository, session.uploadId);
@@ -344,38 +339,39 @@ async function finalizeUpload(
     const markdown = session.kind === "markdown" && session.sizeBytes <= MARKDOWN_VERSION_MAX_BYTES
       ? await readFile(assembled.filePath, "utf8")
       : undefined;
-    try {
-      await deps.blobStore.putFile({
-        key: storageKey,
-        filePath: assembled.filePath,
-        contentType: session.contentType,
-      });
-      storedBlobKey = storageKey;
-    } finally {
-      await assembled.cleanup();
-    }
 
-    const result = await deps.repository.commitUploadedFile({
-      vaultId: session.vaultId,
-      deviceId: session.deviceId,
-      opId: `${session.deviceId}:chunk-upload:${session.uploadId}`,
-      fileId: session.fileId,
-      path: session.path,
-      kind: session.kind,
-      hash,
-      sizeBytes: session.sizeBytes,
-      storageKey,
-      storageKind: deps.blobStore.kind,
-      contentType: session.contentType,
-      mtimeMs: session.mtimeMs,
-      content: markdown,
-      expectedHash: session.expectedCurrentHash,
-      expectedSeq: session.expectedCurrentSeq,
-      quotaReservationId: session.quotaReservationId,
-      uploadId: session.uploadId,
+    const result = await withVaultMutationLock(session.vaultId, async () => {
+      try {
+        await deps.blobStore.putFile({
+          key: storageKey,
+          filePath: assembled.filePath,
+          contentType: session.contentType,
+        });
+      } finally {
+        await assembled.cleanup();
+      }
+
+      return deps.repository.commitUploadedFile({
+        vaultId: session.vaultId,
+        deviceId: session.deviceId,
+        opId: `${session.deviceId}:chunk-upload:${session.uploadId}`,
+        fileId: session.fileId,
+        path: session.path,
+        kind: session.kind,
+        hash,
+        sizeBytes: session.sizeBytes,
+        storageKey,
+        storageKind: deps.blobStore.kind,
+        contentType: session.contentType,
+        mtimeMs: session.mtimeMs,
+        content: markdown,
+        expectedHash: session.expectedCurrentHash,
+        expectedSeq: session.expectedCurrentSeq,
+        quotaReservationId: session.quotaReservationId,
+        uploadId: session.uploadId,
+      });
     });
     finalized = true;
-    storedBlobKey = undefined;
     await rm(chunksDir(deps.config.dataDir, session.uploadId), {
       force: true,
       recursive: true,
@@ -385,11 +381,6 @@ async function finalizeUpload(
 
     return result.finalized ?? { file: result.file, operation: result.operation };
   } catch (error) {
-    if (storedBlobKey) {
-      await deps.blobStore.delete(storedBlobKey).catch((cleanupError) => {
-        console.error("[obsync] failed to remove failed chunk upload blob", cleanupError);
-      });
-    }
     if (!finalized) {
       await deps.repository.markUploadSessionUploading(session.uploadId).catch((resetError) => {
         console.error("[obsync] failed to restore upload session state", resetError);

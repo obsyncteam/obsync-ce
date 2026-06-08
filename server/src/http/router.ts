@@ -21,8 +21,10 @@ import {
   type SyncRepository,
 } from "../sync/repository.js";
 import { appendOperationSchema } from "../sync/operation-schema.js";
-import { InvalidVaultPathError, validateVaultPath } from "../sync/path-policy.js";
+import { MARKDOWN_VERSION_MAX_BYTES } from "../sync/history-limits.js";
+import { InvalidVaultPathError, validateSyncVaultPath } from "../sync/path-policy.js";
 import { buildCompatibilityResult } from "../sync/protocol.js";
+import { withVaultMutationLock } from "../sync/vault-mutation-lock.js";
 import {
   allowedCorsOrigin,
   applyCorsHeaders,
@@ -45,7 +47,6 @@ const ensureVaultSchema = z.object({
   name: z.string().min(1).optional(),
 });
 const HISTORY_CONTENT_MAX_BYTES = 2 * 1024 * 1024;
-const MARKDOWN_VERSION_MAX_BYTES = 1_000_000;
 
 export interface RouterDependencies {
   config: ServerConfig;
@@ -93,7 +94,7 @@ export function createRouter(deps: RouterDependencies) {
         return;
       }
 
-      if (!isAuthorized(request, url, deps.config.authToken)) {
+      if (!isAuthorized(request, deps.config.authToken)) {
         sendError(response, 401, "unauthorized");
         return;
       }
@@ -158,10 +159,7 @@ export function createRouter(deps: RouterDependencies) {
 
       if (request.method === "GET" && url.pathname === "/api/v1/history") {
         const vaultId = requiredSearchParam(url, "vaultId");
-        const path = validateVaultPath(requiredSearchParam(url, "path"), {
-          allowObsidianConfig: true,
-          allowObsidianPlugins: true,
-        });
+        const path = validateSyncVaultPath(requiredSearchParam(url, "path"));
         const page = await deps.repository.historyPage({
           vaultId,
           path,
@@ -174,10 +172,7 @@ export function createRouter(deps: RouterDependencies) {
 
       if (request.method === "GET" && url.pathname === "/api/v1/history/content") {
         const vaultId = requiredSearchParam(url, "vaultId");
-        const path = validateVaultPath(requiredSearchParam(url, "path"), {
-          allowObsidianConfig: true,
-          allowObsidianPlugins: true,
-        });
+        const path = validateSyncVaultPath(requiredSearchParam(url, "path"));
         const serverSeq = optionalPositiveIntegerSearchParam(url, "serverSeq");
         if (!serverSeq) {
           sendError(response, 400, "missing serverSeq");
@@ -230,10 +225,7 @@ export function createRouter(deps: RouterDependencies) {
       if (request.method === "PUT" && url.pathname === "/api/v1/files/content") {
         const vaultId = requiredSearchParam(url, "vaultId");
         const deviceId = requiredSearchParam(url, "deviceId");
-        const path = validateVaultPath(requiredSearchParam(url, "path"), {
-          allowObsidianConfig: true,
-          allowObsidianPlugins: true,
-        });
+        const path = validateSyncVaultPath(requiredSearchParam(url, "path"));
         const kind = url.searchParams.get("kind") ?? "blob";
         if (kind !== "markdown" && kind !== "blob") {
           sendError(response, 400, "invalid file kind");
@@ -253,7 +245,6 @@ export function createRouter(deps: RouterDependencies) {
         const storageKey = blobStorageKey(vaultId, hash);
         let reservationId: string | undefined;
         let shouldCancelReservation = true;
-        let shouldDeleteStoredBlob = false;
 
         try {
           const reservation = await deps.repository.reserveStorage({
@@ -273,33 +264,33 @@ export function createRouter(deps: RouterDependencies) {
             ? await readFile(temp.filePath, "utf8")
             : undefined;
 
-          await deps.blobStore.putFile({
-            key: storageKey,
-            filePath: temp.filePath,
-            contentType,
-          });
-          shouldDeleteStoredBlob = true;
+          const result = await withVaultMutationLock(vaultId, async () => {
+            await deps.blobStore.putFile({
+              key: storageKey,
+              filePath: temp.filePath,
+              contentType,
+            });
 
-          const result = await deps.repository.commitUploadedFile({
-            vaultId,
-            deviceId,
-            opId: `${deviceId}:direct-upload:${Date.now()}:${Math.random().toString(16).slice(2)}`,
-            fileId,
-            path,
-            kind,
-            hash,
-            sizeBytes: temp.sizeBytes,
-            storageKey,
-            storageKind: deps.blobStore.kind,
-            contentType,
-            mtimeMs,
-            content: markdown,
-            expectedHash: expectedCurrentHash,
-            expectedSeq: expectedCurrentSeq,
-            quotaReservationId: reservationId,
+            return deps.repository.commitUploadedFile({
+              vaultId,
+              deviceId,
+              opId: `${deviceId}:direct-upload:${Date.now()}:${Math.random().toString(16).slice(2)}`,
+              fileId,
+              path,
+              kind,
+              hash,
+              sizeBytes: temp.sizeBytes,
+              storageKey,
+              storageKind: deps.blobStore.kind,
+              contentType,
+              mtimeMs,
+              content: markdown,
+              expectedHash: expectedCurrentHash,
+              expectedSeq: expectedCurrentSeq,
+              quotaReservationId: reservationId,
+            });
           });
           shouldCancelReservation = false;
-          shouldDeleteStoredBlob = false;
 
           sendJson(response, 200, {
             ok: true,
@@ -312,11 +303,6 @@ export function createRouter(deps: RouterDependencies) {
               console.error("[obsync] failed to cancel direct upload reservation", error);
             });
           }
-          if (shouldDeleteStoredBlob) {
-            await deps.blobStore.delete(storageKey).catch((error) => {
-              console.error("[obsync] failed to remove failed direct upload blob", error);
-            });
-          }
           await temp.cleanup();
         }
         return;
@@ -324,14 +310,32 @@ export function createRouter(deps: RouterDependencies) {
 
       if (request.method === "GET" && url.pathname === "/api/v1/files/content") {
         const vaultId = requiredSearchParam(url, "vaultId");
-        const path = validateVaultPath(requiredSearchParam(url, "path"), {
-          allowObsidianConfig: true,
-          allowObsidianPlugins: true,
-        });
+        const path = validateSyncVaultPath(requiredSearchParam(url, "path"));
         const file = await deps.repository.fileByPath(vaultId, path);
 
-        if (!file?.storageKey) {
+        if (!file) {
           sendError(response, 404, "file content not found");
+          return;
+        }
+
+        if (!file.storageKey) {
+          const inline = await deps.repository.inlineFileContentByPath(vaultId, path);
+          if (!inline) {
+            sendError(response, 404, "file content not found");
+            return;
+          }
+
+          const body = Buffer.from(inline.content, "utf8");
+          applyCorsHeaders(response);
+          response.writeHead(200, {
+            "content-type": inline.contentType,
+            "content-length": body.byteLength,
+            "x-obsync-kind": file.kind,
+            "x-obsync-hash": inline.hash ?? file.hash ?? "",
+            "x-obsync-size-bytes": String(inline.sizeBytes),
+            "x-obsync-mtime-ms": String(inline.mtimeMs ?? ""),
+          });
+          response.end(body);
           return;
         }
 
@@ -451,10 +455,8 @@ export function createRouter(deps: RouterDependencies) {
 
 export function isAuthorized(
   request: IncomingMessage,
-  url: URL,
   expectedToken: string,
 ): boolean {
-  void url;
   return timingSafeTokenEqual(readHttpToken(request), expectedToken);
 }
 

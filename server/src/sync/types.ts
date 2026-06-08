@@ -75,6 +75,14 @@ export interface FileEntry {
   contentType?: string;
 }
 
+export interface InlineFileContent {
+  content: string;
+  contentType: string;
+  sizeBytes: number;
+  hash?: string;
+  mtimeMs?: number;
+}
+
 export interface ManifestPage {
   manifest: FileEntry[];
   nextCursor?: string;

@@ -3,6 +3,11 @@ export interface VaultPathPolicy {
   allowObsidianPlugins?: boolean;
 }
 
+export const SYNC_VAULT_PATH_POLICY: VaultPathPolicy = {
+  allowObsidianConfig: true,
+  allowObsidianPlugins: true,
+};
+
 export class InvalidVaultPathError extends Error {
   readonly statusCode = 400;
 
@@ -39,6 +44,10 @@ export function isValidVaultPath(
   policy: VaultPathPolicy = {},
 ): boolean {
   return !invalidVaultPathReason(normalizeVaultPath(path), policy, path);
+}
+
+export function validateSyncVaultPath(path: string): string {
+  return validateVaultPath(path, SYNC_VAULT_PATH_POLICY);
 }
 
 function normalizeVaultPath(path: string): string {

@@ -1,12 +1,7 @@
 import { z } from "zod";
-import { validateVaultPath } from "./path-policy.js";
+import { validateSyncVaultPath } from "./path-policy.js";
 
-const syncVaultPathSchema = z.string().min(1).transform((path) => (
-  validateVaultPath(path, {
-    allowObsidianConfig: true,
-    allowObsidianPlugins: true,
-  })
-));
+export const syncVaultPathSchema = z.string().min(1).transform(validateSyncVaultPath);
 
 const opIdSchema = z.string().min(1).max(256);
 const deviceIdSchema = z.string().min(1).max(256);

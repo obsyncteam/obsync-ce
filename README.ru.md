@@ -32,7 +32,7 @@ cp .env.example .env
 Задайте значения. Используйте реальные случайные строки, не оставляйте пустые значения:
 
 ```env
-OBSYNC_POSTGRES_PASSWORD=<случайный пароль PostgreSQL>
+OBSYNC_POSTGRES_PASSWORD=<случайный пароль PostgreSQL, минимум 16 символов>
 OBSYNC_AUTH_TOKEN=<случайный токен минимум 32 символа>
 OBSYNC_PORT=4444
 OBSYNC_STORAGE_QUOTA_BYTES=0
@@ -71,7 +71,7 @@ curl http://127.0.0.1:4444/ready
 
 | Переменная | Обязательная | Описание |
 | --- | --- | --- |
-| `OBSYNC_POSTGRES_PASSWORD` | да | Пароль PostgreSQL для compose-стека. |
+| `OBSYNC_POSTGRES_PASSWORD` | да | Пароль PostgreSQL для compose-стека. Используйте случайное значение минимум 16 символов. |
 | `OBSYNC_AUTH_TOKEN` | да | Общий токен плагина. Используйте длинное случайное значение. |
 | `OBSYNC_PORT` | нет | Порт хоста, проброшенный на `127.0.0.1:4444`. По умолчанию `4444`. |
 | `OBSYNC_STORAGE_QUOTA_BYTES` | нет | Квота хранилища в байтах. `0` отключает квоту. |

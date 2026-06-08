@@ -8,6 +8,7 @@ import type {
   HistoryEntry,
   HistoryPage,
   HistoryVersion,
+  InlineFileContent,
   ManifestPage,
   OperationPage,
   OperationRecord,
@@ -297,17 +298,47 @@ export class SyncRepository {
     return row ? mapFileEntry(row) : undefined;
   }
 
-  async upsertBlobRef(input: UpsertBlobRefInput): Promise<void> {
-    await this.withTransaction(async (client) => {
-      await this.upsertBlobRefInClient(client, input);
-    });
-  }
+  async inlineFileContentByPath(
+    vaultId: string,
+    path: string,
+  ): Promise<InlineFileContent | undefined> {
+    const result = await this.pool.query(
+      `
+        select
+          f.kind,
+          f.hash,
+          f.size_bytes,
+          f.mtime_ms,
+          f.content_type,
+          o.payload
+        from files f
+        left join operations o
+          on o.vault_id = f.vault_id
+         and o.server_seq = f.updated_seq
+        where f.vault_id = $1
+          and f.path = $2
+          and f.deleted_at is null
+        limit 1
+      `,
+      [vaultId, path],
+    );
 
-  async updateFileStorage(input: UpdateFileStorageInput): Promise<void> {
-    await this.withTransaction(async (client) => {
-      await this.acquireVaultWriteLock(client, input.vaultId);
-      await this.updateFileStorageInClient(client, input);
-    });
+    const row = result.rows[0];
+    if (!row || String(row.kind) !== "markdown") return undefined;
+
+    const payload = jsonObject(row.payload);
+    const content = stringPayload(payload, "content");
+    if (content === undefined) return undefined;
+
+    return {
+      content,
+      contentType: optionalString(row.content_type) ??
+        stringPayload(payload, "contentType") ??
+        "text/markdown; charset=utf-8",
+      sizeBytes: optionalNumber(row.size_bytes) ?? Buffer.byteLength(content, "utf8"),
+      hash: optionalString(row.hash) ?? stringPayload(payload, "hash"),
+      mtimeMs: optionalNumber(row.mtime_ms) ?? numberPayload(payload, "mtimeMs"),
+    };
   }
 
   async commitUploadedFile(input: CommitUploadedFileInput): Promise<CommitUploadedFileResult> {
@@ -392,9 +423,7 @@ export class SyncRepository {
     quotaReservationId?: string;
     expiresAt: Date;
   }): Promise<UploadSessionRecord> {
-    const client = await this.pool.connect();
-    try {
-      await client.query("begin");
+    return this.withTransaction(async (client) => {
       await this.ensureVaultInClient(client, input.vaultId);
 
       const result = await client.query(
@@ -442,14 +471,8 @@ export class SyncRepository {
         ],
       );
 
-      await client.query("commit");
       return mapUploadSession(result.rows[0]);
-    } catch (error) {
-      await client.query("rollback");
-      throw error;
-    } finally {
-      client.release();
-    }
+    });
   }
 
   async uploadSession(uploadId: string): Promise<UploadSessionRecord | undefined> {
@@ -494,22 +517,6 @@ export class SyncRepository {
     );
   }
 
-  async finalizeUploadSession(
-    uploadId: string,
-    finalized: Record<string, unknown>,
-  ): Promise<void> {
-    await this.pool.query(
-      `
-        update upload_sessions
-        set status = 'finalized',
-            finalized = $2::jsonb,
-            updated_at = now()
-        where id = $1
-      `,
-      [uploadId, JSON.stringify(finalized)],
-    );
-  }
-
   async deleteUploadSession(uploadId: string): Promise<void> {
     await this.pool.query(
       `
@@ -526,10 +533,7 @@ export class SyncRepository {
     sizeBytes: number;
     hash: string;
   }): Promise<UploadChunkRecord> {
-    const client = await this.pool.connect();
-    try {
-      await client.query("begin");
-
+    return this.withTransaction(async (client) => {
       const result = await client.query(
         `
           insert into upload_chunks(
@@ -557,14 +561,8 @@ export class SyncRepository {
         [input.uploadId],
       );
 
-      await client.query("commit");
       return mapUploadChunk(result.rows[0]);
-    } catch (error) {
-      await client.query("rollback");
-      throw error;
-    } finally {
-      client.release();
-    }
+    });
   }
 
   async uploadChunks(uploadId: string): Promise<UploadChunkRecord[]> {
@@ -663,9 +661,7 @@ export class SyncRepository {
   }
 
   async reserveStorage(input: ReserveStorageInput): Promise<StorageReservationRecord> {
-    const client = await this.pool.connect();
-    try {
-      await client.query("begin");
+    return this.withTransaction(async (client) => {
       await this.ensureVaultInClient(client, input.vaultId);
       await this.acquireVaultWriteLock(client, input.vaultId);
 
@@ -680,7 +676,6 @@ export class SyncRepository {
       );
 
       if (existing.rows[0]) {
-        await client.query("commit");
         return mapStorageReservation(existing.rows[0]);
       }
 
@@ -747,22 +742,8 @@ export class SyncRepository {
         });
       }
 
-      await client.query("commit");
       return mapStorageReservation(result.rows[0]);
-    } catch (error) {
-      await client.query("rollback");
-      throw error;
-    } finally {
-      client.release();
-    }
-  }
-
-  async finalizeQuotaReservation(
-    reservationId: string | undefined,
-    refId?: string,
-  ): Promise<void> {
-    if (!reservationId) return;
-    await this.closeQuotaReservation(reservationId, "finalized", "quota_finalized", refId);
+    });
   }
 
   async cancelQuotaReservation(
@@ -839,14 +820,17 @@ export class SyncRepository {
     return result.rows.map(mapOrphanBlobRef);
   }
 
-  async deleteOrphanBlobRef(input: OrphanBlobRef): Promise<boolean> {
-    const client = await this.pool.connect();
-    try {
-      await client.query("begin");
+  async deleteOrphanBlobRef(
+    input: OrphanBlobRef,
+    deleteBlob: () => Promise<void>,
+  ): Promise<boolean> {
+    return this.withTransaction(async (client) => {
+      await this.acquireVaultWriteLock(client, input.vaultId);
 
       const result = await client.query(
         `
-          delete from blob_refs br
+          select br.size_bytes
+          from blob_refs br
           where br.vault_id = $1
             and br.hash = $2
             and br.storage_key = $3
@@ -859,29 +843,40 @@ export class SyncRepository {
                 and f.hash = br.hash
                 and f.deleted_at is null
             )
-          returning br.size_bytes
+          for update
         `,
         [input.vaultId, input.hash, input.storageKey],
       );
 
-      if (result.rowCount && result.rowCount > 0) {
+      if (!result.rowCount) return false;
+
+      await deleteBlob();
+
+      await client.query(
+        `
+          delete from blob_refs
+          where vault_id = $1
+            and hash = $2
+            and storage_key = $3
+            and orphaned_at is not null
+            and deleted_at is null
+        `,
+        [input.vaultId, input.hash, input.storageKey],
+      );
+
+      const deletedSize = optionalNumber(result.rows[0]?.size_bytes) ?? input.sizeBytes;
+      if (deletedSize > 0) {
         await this.insertLedgerEntry(client, {
           vaultId: input.vaultId,
           source: "storage",
-          deltaPhysicalBytes: -input.sizeBytes,
+          deltaPhysicalBytes: -deletedSize,
           reason: "orphan_blob_deleted",
           refId: input.hash,
         });
       }
 
-      await client.query("commit");
-      return Boolean(result.rowCount && result.rowCount > 0);
-    } catch (error) {
-      await client.query("rollback");
-      throw error;
-    } finally {
-      client.release();
-    }
+      return true;
+    });
   }
 
   private async applyOperationToManifest(
