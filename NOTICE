@@ -1,0 +1,11 @@
+obsync Community Edition
+
+Copyright (c) obsync team.
+
+obsync Community Edition is licensed under AGPL-3.0-only. See LICENSE for the full license text.
+
+obsync Community Edition распространяется под AGPL-3.0-only. Полный текст лицензии находится в LICENSE.
+
+This repository includes package manifests for third-party open-source dependencies. Dependency license information is provided by the package manager metadata in package-lock.json files.
+
+Этот репозиторий включает package manifests для сторонних open-source зависимостей. License information зависимостей предоставляется package manager metadata в package-lock.json файлах.
