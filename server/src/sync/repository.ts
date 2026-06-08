@@ -27,6 +27,13 @@ const MARKDOWN_VERSIONS_RETENTION_LIMIT = 10;
 type DatabaseClient = PostgresClient;
 type QueryClient = Pick<PostgresPool, "query">;
 
+interface StoredContentRef {
+  storageKey: string;
+  storageKind: string;
+  contentType?: string;
+  sizeBytes?: number;
+}
+
 export class SyncRepository {
   private readonly defaultPageLimit = 1000;
   private readonly maxPageLimit = 5000;
@@ -247,6 +254,7 @@ export class SyncRepository {
         select *
         from files
         where vault_id = $1
+          and deleted_at is null
         order by path asc
       `,
       [vaultId],
@@ -266,6 +274,7 @@ export class SyncRepository {
         select *
         from files
         where vault_id = $1
+          and deleted_at is null
           and ($2::text is null or path > $2)
         order by path asc
         limit $3
@@ -404,6 +413,22 @@ export class SyncRepository {
 
       return { file, operation, finalized };
     });
+  }
+
+  async blobRefExists(vaultId: string, hash: string): Promise<boolean> {
+    const result = await this.pool.query(
+      `
+        select 1
+        from blob_refs
+        where vault_id = $1
+          and hash = $2
+          and deleted_at is null
+        limit 1
+      `,
+      [vaultId, hash],
+    );
+
+    return Boolean(result.rows[0]);
   }
 
   async createUploadSession(input: {
@@ -991,20 +1016,19 @@ export class SyncRepository {
     }
 
     const kind = stringPayload(payload, "kind") ?? "markdown";
+    const inlineContent = stringPayload(payload, "content");
+    const storedContent = operation.operationType === "file_upsert" &&
+      kind !== "folder" &&
+      inlineContent === undefined
+      ? await this.storedContentRefInClient(client, operation)
+      : undefined;
     if (
       operation.operationType === "file_upsert" &&
       kind !== "folder" &&
-      stringPayload(payload, "content") === undefined &&
-      payload.contentStored !== true
+      inlineContent === undefined &&
+      !storedContent
     ) {
       throw new MissingFileContentError(operation.opId);
-    }
-    if (
-      operation.operationType === "file_upsert" &&
-      kind !== "folder" &&
-      stringPayload(payload, "content") === undefined
-    ) {
-      await this.assertStoredContentAvailableInClient(client, operation);
     }
 
     const previousSize = await this.activeFileSizeInClient(
@@ -1015,7 +1039,10 @@ export class SyncRepository {
     );
     const nextSize = kind === "folder"
       ? 0
-      : numberPayload(payload, "sizeBytes");
+      : numberPayload(payload, "sizeBytes") ??
+        storedContent?.sizeBytes ??
+        (inlineContent !== undefined ? Buffer.byteLength(inlineContent, "utf8") : undefined);
+    const contentType = stringPayload(payload, "contentType");
 
     await this.assertActivePathAvailableInClient(
       client,
@@ -1035,9 +1062,12 @@ export class SyncRepository {
           size_bytes,
           mtime_ms,
           deleted_at,
-          updated_seq
+          updated_seq,
+          storage_key,
+          storage_kind,
+          content_type
         )
-        values ($1, $2, $3, $4, $5, $6, $7, null, $8)
+        values ($1, $2, $3, $4, $5, $6, $7, null, $8, $9, $10, $11)
         on conflict (vault_id, file_id) do update
           set path = excluded.path,
               kind = excluded.kind,
@@ -1046,6 +1076,9 @@ export class SyncRepository {
               mtime_ms = coalesce(excluded.mtime_ms, files.mtime_ms),
               deleted_at = null,
               updated_seq = excluded.updated_seq,
+              storage_key = excluded.storage_key,
+              storage_kind = excluded.storage_kind,
+              content_type = excluded.content_type,
               updated_at = now()
       `,
       [
@@ -1057,6 +1090,9 @@ export class SyncRepository {
         nextSize,
         numberPayload(payload, "mtimeMs"),
         operation.serverSeq,
+        storedContent?.storageKey,
+        storedContent?.storageKind,
+        storedContent?.contentType ?? contentType,
       ],
     );
 
@@ -1138,6 +1174,9 @@ export class SyncRepository {
     if (result.rows[0]) {
       const operation = mapOperation(result.rows[0]);
       await this.applyOperationToManifest(client, operation);
+      if (input.quotaBytes !== undefined) {
+        await this.assertOperationQuotaInClient(client, operation, input.quotaBytes);
+      }
       await storeMarkdownVersion(client, {
         ...operation,
         source: historySource(operation.deviceId, operation.opId),
@@ -1417,16 +1456,16 @@ export class SyncRepository {
     }
   }
 
-  private async assertStoredContentAvailableInClient(
+  private async storedContentRefInClient(
     client: QueryClient,
     operation: OperationRecord,
-  ): Promise<void> {
+  ): Promise<StoredContentRef | undefined> {
     const hash = stringPayload(operation.payload, "hash");
     if (!hash) throw new MissingFileContentError(operation.opId);
 
     const result = await client.query(
       `
-        select 1
+        select storage_key, storage_kind, content_type, size_bytes
         from blob_refs
         where vault_id = $1
           and hash = $2
@@ -1435,7 +1474,15 @@ export class SyncRepository {
       `,
       [operation.vaultId, hash],
     );
-    if (!result.rows[0]) throw new MissingFileContentError(operation.opId);
+    const row = result.rows[0];
+    if (!row) return undefined;
+
+    return {
+      storageKey: String(row.storage_key),
+      storageKind: String(row.storage_kind),
+      contentType: optionalString(row.content_type),
+      sizeBytes: optionalNumber(row.size_bytes),
+    };
   }
 
   private async activeFileStateInClient(
@@ -1544,6 +1591,42 @@ export class SyncRepository {
       logicalBytes: optionalNumber(result.rows[0]?.logical_bytes) ?? 0,
       reservedBytes: optionalNumber(result.rows[0]?.reserved_bytes) ?? 0,
     };
+  }
+
+  private async assertOperationQuotaInClient(
+    client: Pick<PostgresPool, "query">,
+    operation: OperationRecord,
+    quotaBytes?: number,
+  ): Promise<void> {
+    const payload = operation.payload;
+    if (operation.operationType !== "file_upsert") return;
+    if ((stringPayload(payload, "kind") ?? "markdown") === "folder") return;
+
+    const fileId = operation.fileId ?? stringPayload(payload, "fileId") ?? operation.path;
+    const path = operation.path ?? stringPayload(payload, "path");
+    if (!fileId || !path) return;
+
+    const activeFile = await this.activeFileRecordInClient(
+      client,
+      operation.vaultId,
+      fileId,
+      path,
+    );
+    if (!activeFile) return;
+
+    const quota = await this.vaultQuotaInClient(client, operation.vaultId, quotaBytes);
+    if (quota === undefined) return;
+
+    const usage = await this.storageUsageInClient(client, operation.vaultId);
+    if (usage.logicalBytes + usage.reservedBytes > quota) {
+      throw new StorageQuotaExceededError({
+        vaultId: operation.vaultId,
+        quotaBytes: quota,
+        logicalBytes: usage.logicalBytes,
+        reservedBytes: usage.reservedBytes,
+        requestedBytes: activeFile.sizeBytes,
+      });
+    }
   }
 
   private async closeQuotaReservation(

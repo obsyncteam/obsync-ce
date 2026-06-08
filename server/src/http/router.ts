@@ -217,7 +217,10 @@ export function createRouter(deps: RouterDependencies) {
           vaultId: body.vaultId,
           deviceId: body.deviceId,
         });
-        const operation = await deps.repository.appendOperation(body);
+        const operation = await deps.repository.appendOperation({
+          ...body,
+          quotaBytes: deps.config.storageQuotaBytes,
+        });
         sendJson(response, 200, { ok: true, operation });
         return;
       }
@@ -254,7 +257,7 @@ export function createRouter(deps: RouterDependencies) {
             sizeBytes: temp.sizeBytes,
             source: "sync",
             refId: hash,
-            idempotencyKey: `direct:${deviceId}:${path}:${hash}:${Date.now()}`,
+            idempotencyKey: `direct:${deviceId}:${path}:${hash}`,
             expiresAt: new Date(Date.now() + 60 * 60 * 1000),
             quotaBytes: deps.config.storageQuotaBytes,
           });
@@ -265,30 +268,42 @@ export function createRouter(deps: RouterDependencies) {
             : undefined;
 
           const result = await withVaultMutationLock(vaultId, async () => {
-            await deps.blobStore.putFile({
-              key: storageKey,
-              filePath: temp.filePath,
-              contentType,
-            });
+            const blobAlreadyReferenced = await deps.repository.blobRefExists(vaultId, hash);
+            let blobStored = false;
+            try {
+              await deps.blobStore.putFile({
+                key: storageKey,
+                filePath: temp.filePath,
+                contentType,
+              });
+              blobStored = true;
 
-            return deps.repository.commitUploadedFile({
-              vaultId,
-              deviceId,
-              opId: `${deviceId}:direct-upload:${Date.now()}:${Math.random().toString(16).slice(2)}`,
-              fileId,
-              path,
-              kind,
-              hash,
-              sizeBytes: temp.sizeBytes,
-              storageKey,
-              storageKind: deps.blobStore.kind,
-              contentType,
-              mtimeMs,
-              content: markdown,
-              expectedHash: expectedCurrentHash,
-              expectedSeq: expectedCurrentSeq,
-              quotaReservationId: reservationId,
-            });
+              return await deps.repository.commitUploadedFile({
+                vaultId,
+                deviceId,
+                opId: `${deviceId}:direct-upload:${Date.now()}:${Math.random().toString(16).slice(2)}`,
+                fileId,
+                path,
+                kind,
+                hash,
+                sizeBytes: temp.sizeBytes,
+                storageKey,
+                storageKind: deps.blobStore.kind,
+                contentType,
+                mtimeMs,
+                content: markdown,
+                expectedHash: expectedCurrentHash,
+                expectedSeq: expectedCurrentSeq,
+                quotaReservationId: reservationId,
+              });
+            } catch (error) {
+              if (blobStored && !blobAlreadyReferenced) {
+                await deps.blobStore.delete(storageKey).catch((cleanupError) => {
+                  console.error("[obsync] failed to delete failed direct upload blob", cleanupError);
+                });
+              }
+              throw error;
+            }
           });
           shouldCancelReservation = false;
 

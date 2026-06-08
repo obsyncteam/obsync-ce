@@ -97,6 +97,7 @@ export interface AppendOperationInput {
   fileId?: string;
   path?: string;
   payload: Record<string, unknown>;
+  quotaBytes?: number;
 }
 
 export interface UpsertBlobRefInput {

@@ -11,6 +11,9 @@ interface ClientSession {
   socket: WebSocket;
   vaultId: string;
   deviceId: string;
+  cursor: number;
+  backlogReady: boolean;
+  pendingOperations: OperationRecord[];
 }
 
 export interface SyncSocketDependencies {
@@ -36,7 +39,15 @@ export function createSyncSocketServer(deps: SyncSocketDependencies): WebSocketS
     const deviceId = url.searchParams.get("deviceId") ?? "anonymous";
     const deviceName = url.searchParams.get("deviceName") ?? deviceId;
     const cursor = Number(url.searchParams.get("cursor") ?? "0");
-    const session: ClientSession = { socket, vaultId, deviceId };
+    const initialCursor = Number.isInteger(cursor) && cursor >= 0 ? cursor : 0;
+    const session: ClientSession = {
+      socket,
+      vaultId,
+      deviceId,
+      cursor: initialCursor,
+      backlogReady: false,
+      pendingOperations: [],
+    };
 
     sessions.add(session);
 
@@ -48,10 +59,10 @@ export function createSyncSocketServer(deps: SyncSocketDependencies): WebSocketS
         type: "hello",
         vaultId,
         deviceId,
-        cursor: Number.isInteger(cursor) && cursor >= 0 ? cursor : 0,
+        cursor: initialCursor,
       });
 
-      let backlogCursor = Number.isInteger(cursor) && cursor >= 0 ? cursor : 0;
+      let backlogCursor = initialCursor;
       while (socket.readyState === WebSocket.OPEN) {
         const page = await deps.repository.operationsPage({
           vaultId,
@@ -59,12 +70,15 @@ export function createSyncSocketServer(deps: SyncSocketDependencies): WebSocketS
         });
 
         for (const operation of page.operations) {
+          if (operation.serverSeq <= session.cursor) continue;
           send(socket, { type: "operation", operation });
+          session.cursor = Math.max(session.cursor, operation.serverSeq);
         }
 
         if (!page.hasMore || page.nextCursor <= backlogCursor) break;
         backlogCursor = page.nextCursor;
       }
+      flushBacklogQueue(session);
     } catch (error) {
       console.error("[obsync] websocket setup failed", error);
       socket.close(1011, "setup failed");
@@ -83,6 +97,7 @@ export function createSyncSocketServer(deps: SyncSocketDependencies): WebSocketS
           fileId: parsed.fileId,
           path: parsed.path,
           payload: parsed.payload,
+          quotaBytes: deps.config.storageQuotaBytes,
         });
 
         send(socket, { type: "ack", opId: parsed.opId, serverSeq: operation.serverSeq });
@@ -112,7 +127,7 @@ export function shouldAcceptUpgrade(
     timingSafeTokenEqual(readWebSocketToken(request, url), config.authToken);
 }
 
-function broadcast(
+export function broadcast(
   sessions: Set<ClientSession>,
   source: ClientSession,
   operation: OperationRecord,
@@ -121,8 +136,27 @@ function broadcast(
     if (session === source) continue;
     if (session.vaultId !== source.vaultId) continue;
     if (session.socket.readyState !== WebSocket.OPEN) continue;
+    if (!session.backlogReady) {
+      session.pendingOperations.push(operation);
+      continue;
+    }
+    if (operation.serverSeq <= session.cursor) continue;
 
     send(session.socket, { type: "operation", operation });
+    session.cursor = Math.max(session.cursor, operation.serverSeq);
+  }
+}
+
+export function flushBacklogQueue(session: ClientSession): void {
+  session.backlogReady = true;
+  const operations = session.pendingOperations
+    .splice(0)
+    .sort((left, right) => left.serverSeq - right.serverSeq);
+  for (const operation of operations) {
+    if (session.socket.readyState !== WebSocket.OPEN) return;
+    if (operation.serverSeq <= session.cursor) continue;
+    send(session.socket, { type: "operation", operation });
+    session.cursor = Math.max(session.cursor, operation.serverSeq);
   }
 }
 

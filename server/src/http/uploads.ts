@@ -341,35 +341,45 @@ async function finalizeUpload(
       : undefined;
 
     const result = await withVaultMutationLock(session.vaultId, async () => {
+      const blobAlreadyReferenced = await deps.repository.blobRefExists(session.vaultId, hash);
+      let blobStored = false;
       try {
         await deps.blobStore.putFile({
           key: storageKey,
           filePath: assembled.filePath,
           contentType: session.contentType,
         });
+        blobStored = true;
+
+        return await deps.repository.commitUploadedFile({
+          vaultId: session.vaultId,
+          deviceId: session.deviceId,
+          opId: `${session.deviceId}:chunk-upload:${session.uploadId}`,
+          fileId: session.fileId,
+          path: session.path,
+          kind: session.kind,
+          hash,
+          sizeBytes: session.sizeBytes,
+          storageKey,
+          storageKind: deps.blobStore.kind,
+          contentType: session.contentType,
+          mtimeMs: session.mtimeMs,
+          content: markdown,
+          expectedHash: session.expectedCurrentHash,
+          expectedSeq: session.expectedCurrentSeq,
+          quotaReservationId: session.quotaReservationId,
+          uploadId: session.uploadId,
+        });
+      } catch (error) {
+        if (blobStored && !blobAlreadyReferenced) {
+          await deps.blobStore.delete(storageKey).catch((cleanupError) => {
+            console.error("[obsync] failed to delete failed chunk upload blob", cleanupError);
+          });
+        }
+        throw error;
       } finally {
         await assembled.cleanup();
       }
-
-      return deps.repository.commitUploadedFile({
-        vaultId: session.vaultId,
-        deviceId: session.deviceId,
-        opId: `${session.deviceId}:chunk-upload:${session.uploadId}`,
-        fileId: session.fileId,
-        path: session.path,
-        kind: session.kind,
-        hash,
-        sizeBytes: session.sizeBytes,
-        storageKey,
-        storageKind: deps.blobStore.kind,
-        contentType: session.contentType,
-        mtimeMs: session.mtimeMs,
-        content: markdown,
-        expectedHash: session.expectedCurrentHash,
-        expectedSeq: session.expectedCurrentSeq,
-        quotaReservationId: session.quotaReservationId,
-        uploadId: session.uploadId,
-      });
     });
     finalized = true;
     await rm(chunksDir(deps.config.dataDir, session.uploadId), {
