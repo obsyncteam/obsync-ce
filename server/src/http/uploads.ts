@@ -10,11 +10,18 @@ import { createReadStream, createWriteStream } from "node:fs";
 import { join } from "node:path";
 import { z } from "zod";
 import type { ServerConfig } from "../config.js";
+import { blobStorageKey } from "../storage/blob-key.js";
 import type { BlobStore } from "../storage/blob-store.js";
 import { validateVaultPath } from "../sync/path-policy.js";
 import type { SyncRepository } from "../sync/repository.js";
 import type { UploadChunkRecord, UploadSessionRecord } from "../sync/types.js";
 import { applyCorsHeaders, readJsonBody, sendJson } from "./json.js";
+import {
+  endStream,
+  onceDrainOrError,
+  throwTrackedStreamError,
+  trackWriteStreamError,
+} from "./stream-utils.js";
 
 const DEFAULT_CHUNK_SIZE = 8 * 1024 * 1024;
 const MAX_CHUNK_SIZE = 32 * 1024 * 1024;
@@ -308,8 +315,12 @@ async function finalizeUpload(
   session: UploadSessionRecord,
   expectedHash?: string,
 ) {
-  let operationCommitted = false;
-  await deps.repository.markUploadSessionFinalizing(session.uploadId);
+  let finalized = false;
+  let storedBlobKey: string | undefined;
+  const claimed = await deps.repository.markUploadSessionFinalizing(session.uploadId);
+  if (!claimed) {
+    return await waitForFinalizedUpload(deps.repository, session.uploadId);
+  }
 
   try {
     let assembled: Awaited<ReturnType<typeof assembleUpload>>;
@@ -339,81 +350,47 @@ async function finalizeUpload(
         filePath: assembled.filePath,
         contentType: session.contentType,
       });
+      storedBlobKey = storageKey;
     } finally {
       await assembled.cleanup();
     }
 
-    await deps.repository.ensureVault({ vaultId: session.vaultId });
-    await deps.repository.upsertDevice({
+    const result = await deps.repository.commitUploadedFile({
       vaultId: session.vaultId,
       deviceId: session.deviceId,
-    });
-    await deps.repository.upsertBlobRef({
-      vaultId: session.vaultId,
-      hash,
-      sizeBytes: session.sizeBytes,
-      storageKey,
-      storageKind: deps.blobStore.kind,
-      contentType: session.contentType,
-    });
-
-    const operation = await deps.repository.appendOperation({
-      vaultId: session.vaultId,
       opId: `${session.deviceId}:chunk-upload:${session.uploadId}`,
-      deviceId: session.deviceId,
-      operationType: "file_upsert",
-      fileId: session.fileId,
-      path: session.path,
-      payload: {
-        kind: session.kind,
-        hash,
-        sizeBytes: session.sizeBytes,
-        mtimeMs: session.mtimeMs,
-        contentType: session.contentType,
-        ...(markdown !== undefined ? { content: markdown } : {}),
-        expectedHash: session.expectedCurrentHash,
-        expectedSeq: session.expectedCurrentSeq,
-      },
-    });
-    operationCommitted = true;
-
-    await deps.repository.updateFileStorage({
-      vaultId: session.vaultId,
       fileId: session.fileId,
       path: session.path,
       kind: session.kind,
       hash,
       sizeBytes: session.sizeBytes,
-      mtimeMs: session.mtimeMs,
       storageKey,
       storageKind: deps.blobStore.kind,
       contentType: session.contentType,
-      updatedSeq: operation.serverSeq,
-    });
-    await deps.repository.finalizeQuotaReservation(
-      session.quotaReservationId,
-      operation.opId,
-    );
-
-    const file = {
-      vaultId: session.vaultId,
-      fileId: session.fileId,
-      path: session.path,
-      kind: session.kind,
-      hash,
-      sizeBytes: session.sizeBytes,
       mtimeMs: session.mtimeMs,
-    };
-    const finalized = { file, operation };
-    await deps.repository.finalizeUploadSession(session.uploadId, finalized);
+      content: markdown,
+      expectedHash: session.expectedCurrentHash,
+      expectedSeq: session.expectedCurrentSeq,
+      quotaReservationId: session.quotaReservationId,
+      uploadId: session.uploadId,
+    });
+    finalized = true;
+    storedBlobKey = undefined;
     await rm(chunksDir(deps.config.dataDir, session.uploadId), {
       force: true,
       recursive: true,
+    }).catch((cleanupError) => {
+      console.error("[obsync] failed to remove finalized upload chunks", cleanupError);
     });
 
-    return finalized;
+    return result.finalized ?? { file: result.file, operation: result.operation };
   } catch (error) {
-    if (!operationCommitted) {
+    if (storedBlobKey) {
+      await deps.blobStore.delete(storedBlobKey).catch((cleanupError) => {
+        console.error("[obsync] failed to remove failed chunk upload blob", cleanupError);
+      });
+    }
+    if (!finalized) {
       await deps.repository.markUploadSessionUploading(session.uploadId).catch((resetError) => {
         console.error("[obsync] failed to restore upload session state", resetError);
       });
@@ -444,8 +421,8 @@ async function assembleUpload(
 
   const sessionDir = uploadSessionDir(deps.config.dataDir, session.uploadId);
   await mkdir(sessionDir, { recursive: true });
-  const filePath = join(sessionDir, "assembled.tmp");
-  const output = createWriteStream(filePath, { flags: "w" });
+  const filePath = join(sessionDir, `assembled-${randomUUID()}.tmp`);
+  const output = createWriteStream(filePath, { flags: "wx" });
   const trackedError = trackWriteStreamError(output);
   const hash = createHash("sha256");
   let sizeBytes = 0;
@@ -553,65 +530,6 @@ function assertSafeUploadId(uploadId: string): void {
   if (!/^[a-f0-9-]{36}$/i.test(uploadId)) {
     throw new UploadHttpError(400, "invalid upload id");
   }
-}
-
-function blobStorageKey(vaultId: string, hash: string): string {
-  const safeVaultId = vaultId.replace(/[^a-zA-Z0-9._-]/g, "_");
-  const hashHex = hash.replace(/^sha256:/, "");
-  return `vaults/${safeVaultId}/blobs/${hashHex.slice(0, 2)}/${hashHex}`;
-}
-
-function onceDrainOrError(output: NodeJS.WritableStream): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const cleanup = () => {
-      output.removeListener("drain", onDrain);
-      output.removeListener("error", onError);
-    };
-    const onDrain = () => {
-      cleanup();
-      resolve();
-    };
-    const onError = (error: Error) => {
-      cleanup();
-      reject(error);
-    };
-
-    output.once("drain", onDrain);
-    output.once("error", onError);
-  });
-}
-
-function endStream(output: NodeJS.WritableStream): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const cleanup = () => {
-      output.removeListener("finish", onFinish);
-      output.removeListener("error", onError);
-    };
-    const onFinish = () => {
-      cleanup();
-      resolve();
-    };
-    const onError = (error: Error) => {
-      cleanup();
-      reject(error);
-    };
-    output.once("finish", onFinish);
-    output.once("error", onError);
-    output.end();
-  });
-}
-
-function trackWriteStreamError(output: NodeJS.WritableStream): () => Error | undefined {
-  let tracked: Error | undefined;
-  output.on("error", (error) => {
-    tracked = error instanceof Error ? error : new Error(String(error));
-  });
-  return () => tracked;
-}
-
-function throwTrackedStreamError(error: () => Error | undefined): void {
-  const tracked = error();
-  if (tracked) throw tracked;
 }
 
 function isMissingTempUploadFileError(error: unknown): boolean {

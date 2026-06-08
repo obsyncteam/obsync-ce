@@ -9,8 +9,29 @@ export class BodyTooLargeError extends Error {
   }
 }
 
-export function applyCorsHeaders(response: ServerResponse): void {
-  response.setHeader("access-control-allow-origin", "*");
+export class InvalidJsonError extends Error {
+  readonly statusCode = 400;
+
+  constructor(message = "invalid json") {
+    super(message);
+    this.name = "InvalidJsonError";
+  }
+}
+
+export function allowedCorsOrigin(
+  request: IncomingMessage,
+  allowedOrigins: readonly string[],
+): string | undefined {
+  const origin = request.headers.origin;
+  if (!origin || Array.isArray(origin)) return undefined;
+  return allowedOrigins.includes(origin) ? origin : undefined;
+}
+
+export function applyCorsHeaders(response: ServerResponse, origin?: string): void {
+  if (origin) {
+    response.setHeader("access-control-allow-origin", origin);
+    response.setHeader("vary", "origin");
+  }
   response.setHeader("access-control-allow-methods", "GET,HEAD,POST,PUT,DELETE,OPTIONS");
   response.setHeader(
     "access-control-allow-headers",
@@ -52,27 +73,11 @@ export async function readJsonBody(
   const raw = Buffer.concat(chunks).toString("utf8");
   if (!raw.trim()) return {};
 
-  return JSON.parse(raw);
-}
-
-export async function readRawBody(
-  request: IncomingMessage,
-  maxBytes = 1024 * 1024,
-): Promise<Buffer> {
-  assertContentLengthWithinLimit(request, maxBytes);
-  const chunks: Buffer[] = [];
-  let sizeBytes = 0;
-
-  for await (const chunk of request) {
-    const buffer = Buffer.from(chunk);
-    sizeBytes += buffer.byteLength;
-    if (sizeBytes > maxBytes) {
-      throw new BodyTooLargeError();
-    }
-    chunks.push(buffer);
+  try {
+    return JSON.parse(raw);
+  } catch {
+    throw new InvalidJsonError();
   }
-
-  return Buffer.concat(chunks);
 }
 
 function assertContentLengthWithinLimit(

@@ -1,7 +1,7 @@
 import type { IncomingMessage } from "node:http";
 import { URL } from "node:url";
 import { WebSocket, WebSocketServer } from "ws";
-import { isAuthorized } from "../http/router.js";
+import { readWebSocketToken, timingSafeTokenEqual } from "../auth.js";
 import type { ServerConfig } from "../config.js";
 import { clientOperationSchema } from "../sync/operation-schema.js";
 import type { SyncRepository } from "../sync/repository.js";
@@ -26,6 +26,11 @@ export function createSyncSocketServer(deps: SyncSocketDependencies): WebSocketS
   const sessions = new Set<ClientSession>();
 
   server.on("connection", async (socket, request) => {
+    if (sessions.size >= deps.config.maxWsSessions) {
+      socket.close(1013, "too many websocket sessions");
+      return;
+    }
+
     const url = new URL(request.url ?? "/", "http://localhost");
     const vaultId = url.searchParams.get("vaultId") ?? "default";
     const deviceId = url.searchParams.get("deviceId") ?? "anonymous";
@@ -103,7 +108,8 @@ export function shouldAcceptUpgrade(
   config: ServerConfig,
 ): boolean {
   const url = new URL(request.url ?? "/", "http://localhost");
-  return url.pathname === "/sync" && isAuthorized(request, url, config.authToken);
+  return url.pathname === "/sync" &&
+    timingSafeTokenEqual(readWebSocketToken(request, url), config.authToken);
 }
 
 function broadcast(

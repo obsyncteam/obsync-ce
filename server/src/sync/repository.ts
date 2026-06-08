@@ -1,7 +1,9 @@
 import { randomUUID } from "node:crypto";
-import type { PostgresPool } from "../storage/postgres.js";
+import type { PostgresClient, PostgresPool } from "../storage/postgres.js";
 import type {
   AppendOperationInput,
+  CommitUploadedFileInput,
+  CommitUploadedFileResult,
   FileEntry,
   HistoryEntry,
   HistoryPage,
@@ -21,6 +23,8 @@ import type {
 } from "./types.js";
 
 const MARKDOWN_VERSIONS_RETENTION_LIMIT = 10;
+type DatabaseClient = PostgresClient;
+type QueryClient = Pick<PostgresPool, "query">;
 
 export class SyncRepository {
   private readonly defaultPageLimit = 1000;
@@ -52,85 +56,14 @@ export class SyncRepository {
     deviceId: string;
     name?: string;
   }): Promise<void> {
-    await this.pool.query(
-      `
-        insert into devices(vault_id, id, name)
-        values ($1, $2, $3)
-        on conflict (vault_id, id) do update
-          set name = excluded.name,
-              last_seen_at = now()
-      `,
-      [input.vaultId, input.deviceId, input.name ?? input.deviceId],
-    );
+    await this.upsertDeviceInClient(this.pool, input);
   }
 
   async appendOperation(input: AppendOperationInput): Promise<OperationRecord> {
-    const client = await this.pool.connect();
-    try {
-      await client.query("begin");
+    return this.withTransaction(async (client) => {
       await this.acquireVaultWriteLock(client, input.vaultId);
-
-      const result = await client.query(
-        `
-          insert into operations(
-            vault_id,
-            op_id,
-            device_id,
-            operation_type,
-            file_id,
-            path,
-            payload
-          )
-          values ($1, $2, $3, $4, $5, $6, $7::jsonb)
-          on conflict (vault_id, op_id) do nothing
-          returning *
-        `,
-        [
-          input.vaultId,
-          input.opId,
-          input.deviceId,
-          input.operationType,
-          input.fileId,
-          input.path,
-          JSON.stringify(input.payload ?? {}),
-        ],
-      );
-
-      if (result.rows[0]) {
-        const operation = mapOperation(result.rows[0]);
-        await this.applyOperationToManifest(client, operation);
-        await storeMarkdownVersion(client, {
-          ...operation,
-          source: historySource(operation.deviceId, operation.opId),
-        });
-        await client.query("commit");
-        return operation;
-      }
-
-      const existing = await client.query(
-        `
-          select *
-          from operations
-          where vault_id = $1 and op_id = $2
-          limit 1
-        `,
-        [input.vaultId, input.opId],
-      );
-
-      const existingOperation = mapOperation(existing.rows[0]);
-      assertSameOperation(input, existingOperation);
-      await client.query("commit");
-      return existingOperation;
-    } catch (error) {
-      await client.query("rollback");
-      throw error;
-    } finally {
-      client.release();
-    }
-  }
-
-  async operationsSince(vaultId: string, cursor: number): Promise<OperationRecord[]> {
-    return (await this.operationsPage({ vaultId, cursor })).operations;
+      return this.appendOperationInClient(client, input);
+    });
   }
 
   async operationsPage(input: {
@@ -365,117 +298,81 @@ export class SyncRepository {
   }
 
   async upsertBlobRef(input: UpsertBlobRefInput): Promise<void> {
-    const client = await this.pool.connect();
-    try {
-      await client.query("begin");
-
-      await this.ensureVaultInClient(client, input.vaultId);
-
-      const existing = await client.query(
-        `
-          select 1
-          from blob_refs
-          where vault_id = $1 and hash = $2
-          limit 1
-        `,
-        [input.vaultId, input.hash],
-      );
-
-      await client.query(
-        `
-          insert into blob_refs(
-            vault_id,
-            hash,
-            size_bytes,
-            storage_key,
-            storage_kind,
-            content_type,
-            orphaned_at,
-            deleted_at
-          )
-          values ($1, $2, $3, $4, $5, $6, null, null)
-          on conflict (vault_id, hash) do update
-            set size_bytes = excluded.size_bytes,
-                storage_key = excluded.storage_key,
-                storage_kind = excluded.storage_kind,
-                content_type = excluded.content_type,
-                orphaned_at = null,
-                deleted_at = null
-        `,
-        [
-          input.vaultId,
-          input.hash,
-          input.sizeBytes,
-          input.storageKey,
-          input.storageKind,
-          input.contentType,
-        ],
-      );
-
-      if (existing.rowCount === 0) {
-        await this.insertLedgerEntry(client, {
-          vaultId: input.vaultId,
-          source: "sync",
-          deltaPhysicalBytes: input.sizeBytes,
-          reason: "blob_available",
-          refId: input.hash,
-        });
-      }
-
-      await client.query("commit");
-    } catch (error) {
-      await client.query("rollback");
-      throw error;
-    } finally {
-      client.release();
-    }
+    await this.withTransaction(async (client) => {
+      await this.upsertBlobRefInClient(client, input);
+    });
   }
 
   async updateFileStorage(input: UpdateFileStorageInput): Promise<void> {
-    await this.pool.query(
-      `
-        insert into files(
-          vault_id,
-          file_id,
-          path,
-          kind,
-          hash,
-          size_bytes,
-          mtime_ms,
-          deleted_at,
-          updated_seq,
-          storage_key,
-          storage_kind,
-          content_type
-        )
-        values ($1, $2, $3, $4, $5, $6, $7, null, $8, $9, $10, $11)
-        on conflict (vault_id, file_id) do update
-          set path = excluded.path,
-              kind = excluded.kind,
-              hash = excluded.hash,
-              size_bytes = excluded.size_bytes,
-              mtime_ms = excluded.mtime_ms,
-              deleted_at = null,
-              updated_seq = excluded.updated_seq,
-              storage_key = excluded.storage_key,
-              storage_kind = excluded.storage_kind,
-              content_type = excluded.content_type,
-              updated_at = now()
-      `,
-      [
-        input.vaultId,
-        input.fileId,
-        input.path,
-        input.kind,
-        input.hash,
-        input.sizeBytes,
-        input.mtimeMs,
-        input.updatedSeq,
-        input.storageKey,
-        input.storageKind,
-        input.contentType,
-      ],
-    );
+    await this.withTransaction(async (client) => {
+      await this.acquireVaultWriteLock(client, input.vaultId);
+      await this.updateFileStorageInClient(client, input);
+    });
+  }
+
+  async commitUploadedFile(input: CommitUploadedFileInput): Promise<CommitUploadedFileResult> {
+    return this.withTransaction(async (client) => {
+      await this.acquireVaultWriteLock(client, input.vaultId);
+      await this.ensureVaultInClient(client, input.vaultId);
+      await this.upsertDeviceInClient(client, {
+        vaultId: input.vaultId,
+        deviceId: input.deviceId,
+        name: input.deviceId,
+      });
+      await this.upsertBlobRefInClient(client, input);
+
+      const operation = await this.appendOperationInClient(client, {
+        vaultId: input.vaultId,
+        opId: input.opId,
+        deviceId: input.deviceId,
+        operationType: "file_upsert",
+        fileId: input.fileId,
+        path: input.path,
+        payload: {
+          kind: input.kind,
+          hash: input.hash,
+          sizeBytes: input.sizeBytes,
+          mtimeMs: input.mtimeMs,
+          contentType: input.contentType,
+          contentStored: true,
+          ...(input.content !== undefined ? { content: input.content } : {}),
+          expectedHash: input.expectedHash,
+          expectedSeq: input.expectedSeq,
+        },
+      });
+
+      const file = {
+        vaultId: input.vaultId,
+        fileId: input.fileId,
+        path: input.path,
+        kind: input.kind,
+        hash: input.hash,
+        sizeBytes: input.sizeBytes,
+        mtimeMs: input.mtimeMs,
+        storageKey: input.storageKey,
+        storageKind: input.storageKind,
+        contentType: input.contentType,
+      };
+
+      await this.updateFileStorageInClient(client, {
+        ...file,
+        updatedSeq: operation.serverSeq,
+      });
+      await this.closeQuotaReservationInClient(
+        client,
+        input.quotaReservationId,
+        "finalized",
+        "quota_finalized",
+        operation.opId,
+      );
+
+      const finalized = input.uploadId ? { file, operation } : undefined;
+      if (input.uploadId && finalized) {
+        await this.finalizeUploadSessionInClient(client, input.uploadId, finalized);
+      }
+
+      return { file, operation, finalized };
+    });
   }
 
   async createUploadSession(input: {
@@ -569,17 +466,19 @@ export class SyncRepository {
     return result.rows[0] ? mapUploadSession(result.rows[0]) : undefined;
   }
 
-  async markUploadSessionFinalizing(uploadId: string): Promise<void> {
-    await this.pool.query(
+  async markUploadSessionFinalizing(uploadId: string): Promise<boolean> {
+    const result = await this.pool.query(
       `
         update upload_sessions
         set status = 'finalizing',
             updated_at = now()
         where id = $1
-          and status <> 'finalized'
+          and status = 'uploading'
+        returning id
       `,
       [uploadId],
     );
+    return Boolean(result.rowCount && result.rowCount > 0);
   }
 
   async markUploadSessionUploading(uploadId: string): Promise<void> {
@@ -768,6 +667,7 @@ export class SyncRepository {
     try {
       await client.query("begin");
       await this.ensureVaultInClient(client, input.vaultId);
+      await this.acquireVaultWriteLock(client, input.vaultId);
 
       const existing = await client.query(
         `
@@ -996,23 +896,28 @@ export class SyncRepository {
     await this.assertOperationPreconditions(client, operation, fileId, path);
 
     if (operation.operationType === "delete") {
-      const previousSize = await this.activeFileSizeInClient(
+      const target = await this.activeFileRecordInClient(
         client,
         operation.vaultId,
         fileId,
         path,
       );
+      const tombstoneFileId = target?.fileId ?? fileId;
+      const tombstonePath = target?.path ?? path;
+      const previousSize = target?.sizeBytes ?? 0;
 
-      await client.query(
-        `
-          update files
-          set deleted_at = now(),
-              updated_seq = $3,
-              updated_at = now()
-          where vault_id = $1 and file_id = $2
-        `,
-        [operation.vaultId, fileId, operation.serverSeq],
-      );
+      if (target) {
+        await client.query(
+          `
+            update files
+            set deleted_at = now(),
+                updated_seq = $3,
+                updated_at = now()
+            where vault_id = $1 and file_id = $2
+          `,
+          [operation.vaultId, target.fileId, operation.serverSeq],
+        );
+      }
 
       await client.query(
         `
@@ -1034,8 +939,8 @@ export class SyncRepository {
         `,
         [
           operation.vaultId,
-          fileId,
-          path,
+          tombstoneFileId,
+          tombstonePath,
           operation.opId,
           operation.deviceId,
           operation.serverSeq,
@@ -1055,7 +960,21 @@ export class SyncRepository {
     }
 
     if (operation.operationType === "rename") {
+      const target = await this.activeFileRecordInClient(
+        client,
+        operation.vaultId,
+        fileId,
+        path,
+      );
+      if (!target) return;
+
       const newPath = stringPayload(payload, "newPath") ?? path;
+      await this.assertActivePathAvailableInClient(
+        client,
+        operation.vaultId,
+        target.fileId,
+        newPath,
+      );
       await client.query(
         `
           update files
@@ -1067,7 +986,7 @@ export class SyncRepository {
         `,
         [
           operation.vaultId,
-          fileId,
+          target.fileId,
           newPath,
           stringPayload(payload, "kind"),
           operation.serverSeq,
@@ -1077,6 +996,22 @@ export class SyncRepository {
     }
 
     const kind = stringPayload(payload, "kind") ?? "markdown";
+    if (
+      operation.operationType === "file_upsert" &&
+      kind !== "folder" &&
+      stringPayload(payload, "content") === undefined &&
+      payload.contentStored !== true
+    ) {
+      throw new MissingFileContentError(operation.opId);
+    }
+    if (
+      operation.operationType === "file_upsert" &&
+      kind !== "folder" &&
+      stringPayload(payload, "content") === undefined
+    ) {
+      await this.assertStoredContentAvailableInClient(client, operation);
+    }
+
     const previousSize = await this.activeFileSizeInClient(
       client,
       operation.vaultId,
@@ -1086,6 +1021,13 @@ export class SyncRepository {
     const nextSize = kind === "folder"
       ? 0
       : numberPayload(payload, "sizeBytes");
+
+    await this.assertActivePathAvailableInClient(
+      client,
+      operation.vaultId,
+      fileId,
+      path,
+    );
 
     await client.query(
       `
@@ -1148,8 +1090,262 @@ export class SyncRepository {
     );
   }
 
+  private async upsertDeviceInClient(
+    client: QueryClient,
+    input: {
+      vaultId: string;
+      deviceId: string;
+      name?: string;
+    },
+  ): Promise<void> {
+    await client.query(
+      `
+        insert into devices(vault_id, id, name)
+        values ($1, $2, $3)
+        on conflict (vault_id, id) do update
+          set name = excluded.name,
+              last_seen_at = now()
+      `,
+      [input.vaultId, input.deviceId, input.name ?? input.deviceId],
+    );
+  }
+
+  private async appendOperationInClient(
+    client: QueryClient,
+    input: AppendOperationInput,
+  ): Promise<OperationRecord> {
+    const result = await client.query(
+      `
+        insert into operations(
+          vault_id,
+          op_id,
+          device_id,
+          operation_type,
+          file_id,
+          path,
+          payload
+        )
+        values ($1, $2, $3, $4, $5, $6, $7::jsonb)
+        on conflict (vault_id, op_id) do nothing
+        returning *
+      `,
+      [
+        input.vaultId,
+        input.opId,
+        input.deviceId,
+        input.operationType,
+        input.fileId,
+        input.path,
+        JSON.stringify(input.payload ?? {}),
+      ],
+    );
+
+    if (result.rows[0]) {
+      const operation = mapOperation(result.rows[0]);
+      await this.applyOperationToManifest(client, operation);
+      await storeMarkdownVersion(client, {
+        ...operation,
+        source: historySource(operation.deviceId, operation.opId),
+      });
+      return operation;
+    }
+
+    const existing = await client.query(
+      `
+        select *
+        from operations
+        where vault_id = $1 and op_id = $2
+        limit 1
+      `,
+      [input.vaultId, input.opId],
+    );
+
+    const existingOperation = mapOperation(existing.rows[0]);
+    assertSameOperation(input, existingOperation);
+    return existingOperation;
+  }
+
+  private async upsertBlobRefInClient(
+    client: QueryClient,
+    input: UpsertBlobRefInput,
+  ): Promise<void> {
+    await this.ensureVaultInClient(client, input.vaultId);
+
+    const existing = await client.query(
+      `
+        select 1
+        from blob_refs
+        where vault_id = $1 and hash = $2
+        limit 1
+      `,
+      [input.vaultId, input.hash],
+    );
+
+    await client.query(
+      `
+        insert into blob_refs(
+          vault_id,
+          hash,
+          size_bytes,
+          storage_key,
+          storage_kind,
+          content_type,
+          orphaned_at,
+          deleted_at
+        )
+        values ($1, $2, $3, $4, $5, $6, null, null)
+        on conflict (vault_id, hash) do update
+          set size_bytes = excluded.size_bytes,
+              storage_key = excluded.storage_key,
+              storage_kind = excluded.storage_kind,
+              content_type = excluded.content_type,
+              orphaned_at = null,
+              deleted_at = null
+      `,
+      [
+        input.vaultId,
+        input.hash,
+        input.sizeBytes,
+        input.storageKey,
+        input.storageKind,
+        input.contentType,
+      ],
+    );
+
+    if (existing.rowCount === 0) {
+      await this.insertLedgerEntry(client, {
+        vaultId: input.vaultId,
+        source: "sync",
+        deltaPhysicalBytes: input.sizeBytes,
+        reason: "blob_available",
+        refId: input.hash,
+      });
+    }
+  }
+
+  private async updateFileStorageInClient(
+    client: QueryClient,
+    input: UpdateFileStorageInput,
+  ): Promise<void> {
+    await this.assertActivePathAvailableInClient(
+      client,
+      input.vaultId,
+      input.fileId,
+      input.path,
+    );
+
+    await client.query(
+      `
+        insert into files(
+          vault_id,
+          file_id,
+          path,
+          kind,
+          hash,
+          size_bytes,
+          mtime_ms,
+          deleted_at,
+          updated_seq,
+          storage_key,
+          storage_kind,
+          content_type
+        )
+        values ($1, $2, $3, $4, $5, $6, $7, null, $8, $9, $10, $11)
+        on conflict (vault_id, file_id) do update
+          set path = excluded.path,
+              kind = excluded.kind,
+              hash = excluded.hash,
+              size_bytes = excluded.size_bytes,
+              mtime_ms = excluded.mtime_ms,
+              deleted_at = null,
+              updated_seq = excluded.updated_seq,
+              storage_key = excluded.storage_key,
+              storage_kind = excluded.storage_kind,
+              content_type = excluded.content_type,
+              updated_at = now()
+      `,
+      [
+        input.vaultId,
+        input.fileId,
+        input.path,
+        input.kind,
+        input.hash,
+        input.sizeBytes,
+        input.mtimeMs,
+        input.updatedSeq,
+        input.storageKey,
+        input.storageKind,
+        input.contentType,
+      ],
+    );
+  }
+
+  private async finalizeUploadSessionInClient(
+    client: QueryClient,
+    uploadId: string,
+    finalized: Record<string, unknown>,
+  ): Promise<void> {
+    await client.query(
+      `
+        update upload_sessions
+        set status = 'finalized',
+            finalized = $2::jsonb,
+            updated_at = now()
+        where id = $1
+      `,
+      [uploadId, JSON.stringify(finalized)],
+    );
+  }
+
+  private async closeQuotaReservationInClient(
+    client: QueryClient,
+    reservationId: string | undefined,
+    status: "finalized" | "expired" | "cancelled",
+    reason: string,
+    refId?: string,
+  ): Promise<void> {
+    if (!reservationId) return;
+
+    const existing = await client.query(
+      `
+        select *
+        from quota_reservations
+        where id = $1
+        for update
+      `,
+      [reservationId],
+    );
+    const reservation = existing.rows[0];
+
+    if (!reservation || reservation.status !== "active") {
+      return;
+    }
+
+    await client.query(
+      `
+        update quota_reservations
+        set status = $2,
+            ref_id = coalesce($3, ref_id),
+            updated_at = now()
+        where id = $1
+      `,
+      [reservationId, status, refId],
+    );
+
+    const bytesReserved = optionalNumber(reservation.bytes_reserved) ?? 0;
+    if (bytesReserved > 0) {
+      await this.insertLedgerEntry(client, {
+        vaultId: String(reservation.vault_id),
+        source: String(reservation.source),
+        deltaReservedBytes: -bytesReserved,
+        reason,
+        refId: refId ?? optionalString(reservation.ref_id),
+      });
+    }
+  }
+
   private async acquireVaultWriteLock(
-    client: Pick<PostgresPool, "query">,
+    client: QueryClient,
     vaultId: string,
   ): Promise<void> {
     await client.query(
@@ -1164,34 +1360,24 @@ export class SyncRepository {
     fileId: string,
     path: string,
   ): Promise<number> {
-    const result = await client.query(
-      `
-        select size_bytes
-        from files
-        where vault_id = $1
-          and deleted_at is null
-          and (file_id = $2 or path = $3)
-        order by updated_seq desc nulls last
-        limit 1
-      `,
-      [vaultId, fileId, path],
-    );
-
-    return optionalNumber(result.rows[0]?.size_bytes) ?? 0;
+    return (await this.activeFileRecordInClient(client, vaultId, fileId, path))?.sizeBytes ?? 0;
   }
 
-  private async activeFileStateInClient(
-    client: Pick<PostgresPool, "query">,
+  private async activeFileRecordInClient(
+    client: QueryClient,
     vaultId: string,
     fileId: string,
     path: string,
   ): Promise<{
+    fileId: string;
+    path: string;
     hash?: string;
+    sizeBytes: number;
     updatedSeq?: number;
   } | undefined> {
     const result = await client.query(
       `
-        select hash, updated_seq
+        select file_id, path, hash, size_bytes, updated_seq
         from files
         where vault_id = $1
           and deleted_at is null
@@ -1205,8 +1391,72 @@ export class SyncRepository {
     const row = result.rows[0];
     if (!row) return undefined;
     return {
+      fileId: String(row.file_id),
+      path: String(row.path),
       hash: optionalString(row.hash),
+      sizeBytes: optionalNumber(row.size_bytes) ?? 0,
       updatedSeq: optionalNumber(row.updated_seq),
+    };
+  }
+
+  private async assertActivePathAvailableInClient(
+    client: QueryClient,
+    vaultId: string,
+    fileId: string,
+    path: string,
+  ): Promise<void> {
+    const result = await client.query(
+      `
+        select file_id
+        from files
+        where vault_id = $1
+          and path = $2
+          and file_id <> $3
+          and deleted_at is null
+        limit 1
+      `,
+      [vaultId, path, fileId],
+    );
+    if (result.rows[0]) {
+      throw new FilePathConflictError(path);
+    }
+  }
+
+  private async assertStoredContentAvailableInClient(
+    client: QueryClient,
+    operation: OperationRecord,
+  ): Promise<void> {
+    const hash = stringPayload(operation.payload, "hash");
+    if (!hash) throw new MissingFileContentError(operation.opId);
+
+    const result = await client.query(
+      `
+        select 1
+        from blob_refs
+        where vault_id = $1
+          and hash = $2
+          and deleted_at is null
+        limit 1
+      `,
+      [operation.vaultId, hash],
+    );
+    if (!result.rows[0]) throw new MissingFileContentError(operation.opId);
+  }
+
+  private async activeFileStateInClient(
+    client: Pick<PostgresPool, "query">,
+    vaultId: string,
+    fileId: string,
+    path: string,
+  ): Promise<{
+    hash?: string;
+    updatedSeq?: number;
+  } | undefined> {
+    const row = await this.activeFileRecordInClient(client, vaultId, fileId, path);
+    if (!row) return undefined;
+    return {
+      hash: row.hash,
+      updatedSeq: row.updatedSeq,
     };
   }
 
@@ -1307,55 +1557,9 @@ export class SyncRepository {
     reason: string,
     refId?: string,
   ): Promise<void> {
-    const client = await this.pool.connect();
-    try {
-      await client.query("begin");
-
-      const existing = await client.query(
-        `
-          select *
-          from quota_reservations
-          where id = $1
-          for update
-        `,
-        [reservationId],
-      );
-      const reservation = existing.rows[0];
-
-      if (!reservation || reservation.status !== "active") {
-        await client.query("commit");
-        return;
-      }
-
-      await client.query(
-        `
-          update quota_reservations
-          set status = $2,
-              ref_id = coalesce($3, ref_id),
-              updated_at = now()
-          where id = $1
-        `,
-        [reservationId, status, refId],
-      );
-
-      const bytesReserved = optionalNumber(reservation.bytes_reserved) ?? 0;
-      if (bytesReserved > 0) {
-        await this.insertLedgerEntry(client, {
-          vaultId: String(reservation.vault_id),
-          source: String(reservation.source),
-          deltaReservedBytes: -bytesReserved,
-          reason,
-          refId: refId ?? optionalString(reservation.ref_id),
-        });
-      }
-
-      await client.query("commit");
-    } catch (error) {
-      await client.query("rollback");
-      throw error;
-    } finally {
-      client.release();
-    }
+    await this.withTransaction(async (client) => {
+      await this.closeQuotaReservationInClient(client, reservationId, status, reason, refId);
+    });
   }
 
   private async insertLedgerEntry(
@@ -1398,6 +1602,23 @@ export class SyncRepository {
     );
   }
 
+  private async withTransaction<T>(
+    callback: (client: DatabaseClient) => Promise<T>,
+  ): Promise<T> {
+    const client = await this.pool.connect();
+    try {
+      await client.query("begin");
+      const result = await callback(client);
+      await client.query("commit");
+      return result;
+    } catch (error) {
+      await client.query("rollback");
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
   private normalizeLimit(limit?: number): number {
     if (!limit) return this.defaultPageLimit;
     return Math.max(1, Math.min(limit, this.maxPageLimit));
@@ -1415,6 +1636,20 @@ export class OperationPreconditionFailedError extends Error {
   constructor(readonly opId: string, message: string) {
     super(message);
     this.name = "OperationPreconditionFailedError";
+  }
+}
+
+export class MissingFileContentError extends Error {
+  constructor(readonly opId: string) {
+    super(`file_upsert ${opId} is missing file content`);
+    this.name = "MissingFileContentError";
+  }
+}
+
+export class FilePathConflictError extends Error {
+  constructor(readonly path: string) {
+    super(`file path is already used: ${path}`);
+    this.name = "FilePathConflictError";
   }
 }
 

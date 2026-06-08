@@ -5,7 +5,7 @@ services:
     environment:
       POSTGRES_DB: obsync
       POSTGRES_USER: obsync
-      POSTGRES_PASSWORD: ${OBSYNC_POSTGRES_PASSWORD}
+      POSTGRES_PASSWORD: ${OBSYNC_POSTGRES_PASSWORD:?Set OBSYNC_POSTGRES_PASSWORD in .env}
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U obsync -d obsync"]
       interval: 10s
@@ -21,13 +21,19 @@ services:
     restart: unless-stopped
     environment:
       NODE_ENV: production
-      DATABASE_URL: postgres://obsync:${OBSYNC_POSTGRES_PASSWORD}@postgres:5432/obsync
-      OBSYNC_AUTH_TOKEN: ${OBSYNC_AUTH_TOKEN}
+      OBSYNC_POSTGRES_HOST: postgres
+      OBSYNC_POSTGRES_PORT: 5432
+      OBSYNC_POSTGRES_DB: obsync
+      OBSYNC_POSTGRES_USER: obsync
+      OBSYNC_POSTGRES_PASSWORD: ${OBSYNC_POSTGRES_PASSWORD:?Set OBSYNC_POSTGRES_PASSWORD in .env}
+      OBSYNC_AUTH_TOKEN: ${OBSYNC_AUTH_TOKEN:?Set OBSYNC_AUTH_TOKEN in .env}
       OBSYNC_HOST: 0.0.0.0
       OBSYNC_PORT: 4444
       OBSYNC_DATA_DIR: /data
-      OBSYNC_ENABLE_WEB_ROUTES: "false"
+      OBSYNC_ALLOWED_ORIGINS: ${OBSYNC_ALLOWED_ORIGINS:-}
       OBSYNC_STORAGE_QUOTA_BYTES: ${OBSYNC_STORAGE_QUOTA_BYTES:-0}
+      OBSYNC_MAX_HTTP_CONNECTIONS: ${OBSYNC_MAX_HTTP_CONNECTIONS:-1024}
+      OBSYNC_MAX_WS_SESSIONS: ${OBSYNC_MAX_WS_SESSIONS:-256}
       OBSYNC_S3_ENDPOINT: ${OBSYNC_S3_ENDPOINT:-}
       OBSYNC_S3_REGION: ${OBSYNC_S3_REGION:-}
       OBSYNC_S3_BUCKET: ${OBSYNC_S3_BUCKET:-}
@@ -38,12 +44,12 @@ services:
       postgres:
         condition: service_healthy
     healthcheck:
-      test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:4444/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
+      test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:4444/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
       interval: 10s
       timeout: 5s
       retries: 10
     ports:
-      - "${OBSYNC_PORT:-4444}:4444"
+      - "127.0.0.1:${OBSYNC_PORT:-4444}:4444"
     volumes:
       - obsync-data:/data
 

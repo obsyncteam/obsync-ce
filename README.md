@@ -29,13 +29,14 @@ Create `.env`:
 cp .env.example .env
 ```
 
-Set values:
+Set values. Use real random strings and do not leave empty values:
 
 ```env
-OBSYNC_POSTGRES_PASSWORD=change-this-password
-OBSYNC_AUTH_TOKEN=change-this-token
+OBSYNC_POSTGRES_PASSWORD=<random PostgreSQL password>
+OBSYNC_AUTH_TOKEN=<random token at least 32 characters long>
 OBSYNC_PORT=4444
 OBSYNC_STORAGE_QUOTA_BYTES=0
+OBSYNC_ALLOWED_ORIGINS=
 ```
 
 Start:
@@ -48,15 +49,19 @@ Check:
 
 ```bash
 docker compose ps
-curl http://127.0.0.1:4444/health
+curl http://127.0.0.1:4444/ready
 ```
 
-Expected health response:
+Expected ready response:
 
 ```json
 {
   "ok": true,
-  "service": "obsync-server"
+  "service": "obsync-server",
+  "storage": {
+    "metadata": "postgres",
+    "blobs": "filesystem"
+  }
 }
 ```
 
@@ -68,8 +73,9 @@ Expected health response:
 | --- | --- | --- |
 | `OBSYNC_POSTGRES_PASSWORD` | yes | PostgreSQL password used by the compose stack. |
 | `OBSYNC_AUTH_TOKEN` | yes | Shared plugin token. Use a long random value. |
-| `OBSYNC_PORT` | no | Host port mapped to container port `4444`. Default: `4444`. |
+| `OBSYNC_PORT` | no | Host port mapped to `127.0.0.1:4444`. Default: `4444`. |
 | `OBSYNC_STORAGE_QUOTA_BYTES` | no | Storage quota in bytes. `0` disables the quota. |
+| `OBSYNC_ALLOWED_ORIGINS` | no | Comma-separated origins for browser CORS access. CORS is closed by default. |
 
 ## S3 Storage
 
@@ -101,6 +107,7 @@ Forward these paths:
 
 ```text
 /health
+/ready
 /api/v1/
 /sync
 ```

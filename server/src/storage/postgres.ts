@@ -1,12 +1,19 @@
 import pg from "pg";
+import type { DatabaseConfig } from "../config.js";
 
 const { Pool } = pg;
 
 export type PostgresPool = pg.Pool;
+export type PostgresClient = pg.PoolClient;
 
-export function createPostgresPool(databaseUrl: string): PostgresPool {
+export function createPostgresPool(database: DatabaseConfig): PostgresPool {
   return new Pool({
-    connectionString: databaseUrl,
+    connectionString: database.connectionString,
+    host: database.host,
+    port: database.port,
+    database: database.database,
+    user: database.user,
+    password: database.password,
     max: 10,
     idleTimeoutMillis: 30_000,
     connectionTimeoutMillis: 10_000,
@@ -54,8 +61,7 @@ export async function runMigrations(pool: PostgresPool): Promise<void> {
       deleted_at timestamptz,
       updated_seq bigint,
       updated_at timestamptz not null default now(),
-      primary key (vault_id, file_id),
-      unique (vault_id, path)
+      primary key (vault_id, file_id)
     );
 
     create table if not exists operations (
@@ -254,6 +260,15 @@ export async function runMigrations(pool: PostgresPool): Promise<void> {
 
     create index if not exists markdown_versions_vault_file_seq_idx
       on markdown_versions(vault_id, file_id, server_seq desc);
+  `);
+
+  await migrate(pool, 7, "active_file_path_unique", `
+    alter table files
+      drop constraint if exists files_vault_id_path_key;
+
+    create unique index if not exists files_vault_path_active_unique_idx
+      on files(vault_id, path)
+      where deleted_at is null;
   `);
 }
 

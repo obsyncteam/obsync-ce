@@ -9,9 +9,12 @@ import { URL } from "node:url";
 import { z } from "zod";
 import { readHttpToken, timingSafeTokenEqual } from "../auth.js";
 import type { ServerConfig } from "../config.js";
+import { blobStorageKey } from "../storage/blob-key.js";
 import type { BlobStore } from "../storage/blob-store.js";
 import type { BlobReadRange } from "../storage/blob-store.js";
 import {
+  FilePathConflictError,
+  MissingFileContentError,
   OperationIdConflictError,
   OperationPreconditionFailedError,
   StorageQuotaExceededError,
@@ -20,8 +23,22 @@ import {
 import { appendOperationSchema } from "../sync/operation-schema.js";
 import { InvalidVaultPathError, validateVaultPath } from "../sync/path-policy.js";
 import { buildCompatibilityResult } from "../sync/protocol.js";
-import { applyCorsHeaders, BodyTooLargeError, readJsonBody, sendError, sendJson } from "./json.js";
+import {
+  allowedCorsOrigin,
+  applyCorsHeaders,
+  BodyTooLargeError,
+  InvalidJsonError,
+  readJsonBody,
+  sendError,
+  sendJson,
+} from "./json.js";
 import { handleUploadRoutes, isUploadHttpError } from "./uploads.js";
+import {
+  endStream,
+  onceDrainOrError,
+  throwTrackedStreamError,
+  trackWriteStreamError,
+} from "./stream-utils.js";
 
 const ensureVaultSchema = z.object({
   vaultId: z.string().min(1).optional(),
@@ -40,9 +57,15 @@ export interface RouterDependencies {
 export function createRouter(deps: RouterDependencies) {
   return async (request: IncomingMessage, response: ServerResponse): Promise<void> => {
     const url = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`);
+    const corsOrigin = allowedCorsOrigin(request, deps.config.allowedOrigins);
+    if (corsOrigin) applyCorsHeaders(response, corsOrigin);
 
     try {
       if (request.method === "OPTIONS") {
+        if (request.headers.origin && !corsOrigin) {
+          sendError(response, 403, "origin is not allowed");
+          return;
+        }
         applyCorsHeaders(response);
         response.writeHead(204);
         response.end();
@@ -50,6 +73,14 @@ export function createRouter(deps: RouterDependencies) {
       }
 
       if (request.method === "GET" && url.pathname === "/health") {
+        sendJson(response, 200, {
+          ok: true,
+          service: "obsync-server",
+        });
+        return;
+      }
+
+      if (request.method === "GET" && url.pathname === "/ready") {
         await deps.dbReady();
         sendJson(response, 200, {
           ok: true,
@@ -222,11 +253,9 @@ export function createRouter(deps: RouterDependencies) {
         const storageKey = blobStorageKey(vaultId, hash);
         let reservationId: string | undefined;
         let shouldCancelReservation = true;
+        let shouldDeleteStoredBlob = false;
 
         try {
-          await deps.repository.ensureVault({ vaultId });
-          await deps.repository.upsertDevice({ vaultId, deviceId });
-
           const reservation = await deps.repository.reserveStorage({
             vaultId,
             fileId,
@@ -249,69 +278,43 @@ export function createRouter(deps: RouterDependencies) {
             filePath: temp.filePath,
             contentType,
           });
+          shouldDeleteStoredBlob = true;
 
-          await deps.repository.upsertBlobRef({
+          const result = await deps.repository.commitUploadedFile({
             vaultId,
-            hash,
-            sizeBytes: temp.sizeBytes,
-            storageKey,
-            storageKind: deps.blobStore.kind,
-            contentType,
-          });
-
-          const operation = await deps.repository.appendOperation({
-            vaultId,
-            opId: `${deviceId}:direct-upload:${Date.now()}:${Math.random().toString(16).slice(2)}`,
             deviceId,
-            operationType: "file_upsert",
-            fileId,
-            path,
-            payload: {
-              kind,
-              hash,
-              sizeBytes: temp.sizeBytes,
-              mtimeMs,
-              contentType,
-              ...(markdown !== undefined ? { content: markdown } : {}),
-              expectedHash: expectedCurrentHash,
-              expectedSeq: expectedCurrentSeq,
-            },
-          });
-
-          await deps.repository.updateFileStorage({
-            vaultId,
+            opId: `${deviceId}:direct-upload:${Date.now()}:${Math.random().toString(16).slice(2)}`,
             fileId,
             path,
             kind,
             hash,
             sizeBytes: temp.sizeBytes,
-            mtimeMs,
             storageKey,
             storageKind: deps.blobStore.kind,
             contentType,
-            updatedSeq: operation.serverSeq,
+            mtimeMs,
+            content: markdown,
+            expectedHash: expectedCurrentHash,
+            expectedSeq: expectedCurrentSeq,
+            quotaReservationId: reservationId,
           });
-
-          await deps.repository.finalizeQuotaReservation(reservationId, operation.opId);
           shouldCancelReservation = false;
+          shouldDeleteStoredBlob = false;
 
           sendJson(response, 200, {
             ok: true,
-            file: {
-              vaultId,
-              fileId,
-              path,
-              kind,
-              hash,
-              sizeBytes: temp.sizeBytes,
-              mtimeMs,
-            },
-            operation,
+            file: result.file,
+            operation: result.operation,
           });
         } finally {
           if (shouldCancelReservation) {
             await deps.repository.cancelQuotaReservation(reservationId).catch((error) => {
               console.error("[obsync] failed to cancel direct upload reservation", error);
+            });
+          }
+          if (shouldDeleteStoredBlob) {
+            await deps.blobStore.delete(storageKey).catch((error) => {
+              console.error("[obsync] failed to remove failed direct upload blob", error);
             });
           }
           await temp.cleanup();
@@ -389,7 +392,11 @@ export function createRouter(deps: RouterDependencies) {
         return;
       }
 
-      if (error instanceof BodyTooLargeError || error instanceof InvalidVaultPathError) {
+      if (
+        error instanceof BodyTooLargeError ||
+        error instanceof InvalidJsonError ||
+        error instanceof InvalidVaultPathError
+      ) {
         sendError(response, error.statusCode, error.message);
         return;
       }
@@ -401,6 +408,16 @@ export function createRouter(deps: RouterDependencies) {
 
       if (error instanceof OperationPreconditionFailedError) {
         sendError(response, 409, error.message);
+        return;
+      }
+
+      if (error instanceof FilePathConflictError) {
+        sendError(response, 409, error.message);
+        return;
+      }
+
+      if (error instanceof MissingFileContentError) {
+        sendError(response, 400, error.message);
         return;
       }
 
@@ -437,7 +454,8 @@ export function isAuthorized(
   url: URL,
   expectedToken: string,
 ): boolean {
-  return timingSafeTokenEqual(readHttpToken(request, url), expectedToken);
+  void url;
+  return timingSafeTokenEqual(readHttpToken(request), expectedToken);
 }
 
 function requiredSearchParam(url: URL, name: string): string {
@@ -512,12 +530,6 @@ function parseRangeHeader(
   return { start, end };
 }
 
-function blobStorageKey(vaultId: string, hash: string): string {
-  const safeVaultId = vaultId.replace(/[^a-zA-Z0-9._-]/g, "_");
-  const hashHex = hash.replace(/^sha256:/, "");
-  return `vaults/${safeVaultId}/blobs/${hashHex.slice(0, 2)}/${hashHex}`;
-}
-
 async function historyVersionContent(
   version: Awaited<ReturnType<SyncRepository["historyVersion"]>>,
   blobStore: BlobStore,
@@ -583,10 +595,12 @@ async function writeRequestBodyToTemp(
     `${Date.now()}-${Math.random().toString(16).slice(2)}.upload`,
   );
   const output = createWriteStream(filePath, { flags: "wx" });
+  const trackedError = trackWriteStreamError(output);
   let sizeBytes = 0;
 
   try {
     for await (const chunk of request) {
+      throwTrackedStreamError(trackedError);
       const buffer = Buffer.from(chunk);
       sizeBytes += buffer.byteLength;
       if (sizeBytes > maxBytes) {
@@ -599,12 +613,8 @@ async function writeRequestBodyToTemp(
       }
     }
 
-    await new Promise<void>((resolve, reject) => {
-      output.end((error?: Error | null) => {
-        if (error) reject(error);
-        else resolve();
-      });
-    });
+    throwTrackedStreamError(trackedError);
+    await endStream(output);
 
     return {
       filePath,
@@ -617,24 +627,4 @@ async function writeRequestBodyToTemp(
     await rm(filePath, { force: true });
     throw error;
   }
-}
-
-function onceDrainOrError(output: NodeJS.WritableStream): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const cleanup = () => {
-      output.removeListener("drain", onDrain);
-      output.removeListener("error", onError);
-    };
-    const onDrain = () => {
-      cleanup();
-      resolve();
-    };
-    const onError = (error: Error) => {
-      cleanup();
-      reject(error);
-    };
-
-    output.once("drain", onDrain);
-    output.once("error", onError);
-  });
 }

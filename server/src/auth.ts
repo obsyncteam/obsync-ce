@@ -23,10 +23,16 @@ export function readBearerToken(request: IncomingMessage): string | undefined {
   return match?.[1];
 }
 
-export function readHttpToken(request: IncomingMessage, url: URL): string | undefined {
+export function readHttpToken(request: IncomingMessage): string | undefined {
   return (
     readBearerToken(request) ??
-    firstHeaderValue(request.headers["x-obsync-token"]) ??
+    firstHeaderValue(request.headers["x-obsync-token"])
+  );
+}
+
+export function readWebSocketToken(request: IncomingMessage, url: URL): string | undefined {
+  return (
+    readHttpToken(request) ??
     url.searchParams.get("token") ??
     undefined
   );

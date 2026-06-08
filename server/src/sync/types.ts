@@ -114,6 +114,35 @@ export interface UpdateFileStorageInput {
   updatedSeq: number;
 }
 
+export interface UploadedFileRecord {
+  vaultId: string;
+  fileId: string;
+  path: string;
+  kind: string;
+  hash: string;
+  sizeBytes: number;
+  mtimeMs?: number;
+  storageKey: string;
+  storageKind: string;
+  contentType?: string;
+}
+
+export interface CommitUploadedFileInput extends UploadedFileRecord {
+  deviceId: string;
+  opId: string;
+  content?: string;
+  expectedHash?: string;
+  expectedSeq?: number;
+  quotaReservationId?: string;
+  uploadId?: string;
+}
+
+export interface CommitUploadedFileResult {
+  file: UploadedFileRecord;
+  operation: OperationRecord;
+  finalized?: Record<string, unknown>;
+}
+
 export interface StorageReservationRecord {
   id: string;
   vaultId: string;

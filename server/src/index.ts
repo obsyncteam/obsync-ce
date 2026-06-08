@@ -13,7 +13,7 @@ import { createSyncSocketServer, shouldAcceptUpgrade } from "./ws/sync-socket.js
 
 async function main(): Promise<void> {
   const config = loadConfig();
-  const pool = createPostgresPool(config.databaseUrl);
+  const pool = createPostgresPool(config.database);
 
   await assertPostgresReady(pool);
   await runMigrations(pool);
@@ -31,6 +31,11 @@ async function main(): Promise<void> {
   });
 
   const httpServer = http.createServer(router);
+  httpServer.maxConnections = config.maxHttpConnections;
+  httpServer.requestTimeout = 60_000;
+  httpServer.headersTimeout = 65_000;
+  httpServer.keepAliveTimeout = 5_000;
+
   const wsServer = createSyncSocketServer({ config, repository });
   const storageCleanupTimer = setInterval(() => {
     void cleanupStorage({

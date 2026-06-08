@@ -29,13 +29,14 @@ cd obsync-ce
 cp .env.example .env
 ```
 
-Задайте значения:
+Задайте значения. Используйте реальные случайные строки, не оставляйте пустые значения:
 
 ```env
-OBSYNC_POSTGRES_PASSWORD=change-this-password
-OBSYNC_AUTH_TOKEN=change-this-token
+OBSYNC_POSTGRES_PASSWORD=<случайный пароль PostgreSQL>
+OBSYNC_AUTH_TOKEN=<случайный токен минимум 32 символа>
 OBSYNC_PORT=4444
 OBSYNC_STORAGE_QUOTA_BYTES=0
+OBSYNC_ALLOWED_ORIGINS=
 ```
 
 Запустите:
@@ -48,15 +49,19 @@ docker compose up -d --build
 
 ```bash
 docker compose ps
-curl http://127.0.0.1:4444/health
+curl http://127.0.0.1:4444/ready
 ```
 
-Ожидаемый health-ответ:
+Ожидаемый ready-ответ:
 
 ```json
 {
   "ok": true,
-  "service": "obsync-server"
+  "service": "obsync-server",
+  "storage": {
+    "metadata": "postgres",
+    "blobs": "filesystem"
+  }
 }
 ```
 
@@ -68,8 +73,9 @@ curl http://127.0.0.1:4444/health
 | --- | --- | --- |
 | `OBSYNC_POSTGRES_PASSWORD` | да | Пароль PostgreSQL для compose-стека. |
 | `OBSYNC_AUTH_TOKEN` | да | Общий токен плагина. Используйте длинное случайное значение. |
-| `OBSYNC_PORT` | нет | Порт хоста, проброшенный на порт контейнера `4444`. По умолчанию `4444`. |
+| `OBSYNC_PORT` | нет | Порт хоста, проброшенный на `127.0.0.1:4444`. По умолчанию `4444`. |
 | `OBSYNC_STORAGE_QUOTA_BYTES` | нет | Квота хранилища в байтах. `0` отключает квоту. |
+| `OBSYNC_ALLOWED_ORIGINS` | нет | Список origins через запятую для браузерного CORS-доступа. По умолчанию CORS не открыт. |
 
 ## S3-хранилище
 
@@ -101,6 +107,7 @@ curl http://127.0.0.1:4444/health
 
 ```text
 /health
+/ready
 /api/v1/
 /sync
 ```
