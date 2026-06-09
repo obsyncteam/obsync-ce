@@ -5,7 +5,6 @@
   "type": "module",
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "check:community-boundary": "node scripts/check-community-boundary.mjs",
     "dev": "tsx src/index.ts",
     "start": "node dist/index.js",
     "typecheck": "tsc -p tsconfig.json --noEmit"

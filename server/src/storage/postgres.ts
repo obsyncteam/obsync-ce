@@ -176,7 +176,6 @@ export async function runMigrations(pool: PostgresPool): Promise<void> {
       source text not null,
       delta_logical_bytes bigint not null default 0,
       delta_physical_bytes bigint not null default 0,
-      delta_published_bytes bigint not null default 0,
       delta_reserved_bytes bigint not null default 0,
       reason text not null,
       ref_id text,

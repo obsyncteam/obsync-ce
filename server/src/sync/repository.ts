@@ -1647,7 +1647,6 @@ export class SyncRepository {
       source: string;
       deltaLogicalBytes?: number;
       deltaPhysicalBytes?: number;
-      deltaPublishedBytes?: number;
       deltaReservedBytes?: number;
       reason: string;
       refId?: string;
@@ -1660,19 +1659,17 @@ export class SyncRepository {
           source,
           delta_logical_bytes,
           delta_physical_bytes,
-          delta_published_bytes,
           delta_reserved_bytes,
           reason,
           ref_id
         )
-        values ($1, $2, $3, $4, $5, $6, $7, $8)
+        values ($1, $2, $3, $4, $5, $6, $7)
       `,
       [
         input.vaultId,
         input.source,
         input.deltaLogicalBytes ?? 0,
         input.deltaPhysicalBytes ?? 0,
-        input.deltaPublishedBytes ?? 0,
         input.deltaReservedBytes ?? 0,
         input.reason,
         input.refId,
