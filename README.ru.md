@@ -134,38 +134,6 @@ https://sync.example.com
 https://github.com/obsyncteam/obsync-plugin
 ```
 
-### Установка из release
-
-Скачайте архив плагина из releases:
-
-```text
-https://github.com/obsyncteam/obsync-plugin/releases
-```
-
-Формат имени архива:
-
-```text
-obsync_vX.Y.Z.zip
-```
-
-Структура архива:
-
-```text
-obsync/main.js
-obsync/manifest.json
-obsync/styles.css
-```
-
-Распакуйте архив в папку плагинов хранилища:
-
-```text
-<хранилище>/.obsidian/plugins/obsync/main.js
-<хранилище>/.obsidian/plugins/obsync/manifest.json
-<хранилище>/.obsidian/plugins/obsync/styles.css
-```
-
-Используйте версию из `manifest.json` репозитория плагина в именах релизных архивов.
-
 ### Сборка из исходников
 
 Соберите:
@@ -184,7 +152,7 @@ mkdir -p /path/to/vault/.obsidian/plugins/obsync
 cp main.js manifest.json styles.css /path/to/vault/.obsidian/plugins/obsync/
 ```
 
-После установки любым способом перезапустите Obsidian или перезагрузите приложение. Включите Obsync в Community plugins.
+После установки перезапустите Obsidian или перезагрузите приложение. Включите Obsync в Community plugins.
 
 ## Настройки плагина
 

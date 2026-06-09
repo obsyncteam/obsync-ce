@@ -134,38 +134,6 @@ Plugin repository:
 https://github.com/obsyncteam/obsync-plugin
 ```
 
-### Install From Release
-
-Download the plugin archive from releases:
-
-```text
-https://github.com/obsyncteam/obsync-plugin/releases
-```
-
-Release zip name format:
-
-```text
-obsync_vX.Y.Z.zip
-```
-
-Archive structure:
-
-```text
-obsync/main.js
-obsync/manifest.json
-obsync/styles.css
-```
-
-Extract it into the vault plugins directory:
-
-```text
-<vault>/.obsidian/plugins/obsync/main.js
-<vault>/.obsidian/plugins/obsync/manifest.json
-<vault>/.obsidian/plugins/obsync/styles.css
-```
-
-Use the version from the plugin repository `manifest.json` in release archive names.
-
 ### Build From Source
 
 Build:
@@ -184,7 +152,7 @@ mkdir -p /path/to/vault/.obsidian/plugins/obsync
 cp main.js manifest.json styles.css /path/to/vault/.obsidian/plugins/obsync/
 ```
 
-After installing either way, restart Obsidian or reload the app. Enable Obsync in Community plugins.
+After installation, restart Obsidian or reload the app. Enable Obsync in Community plugins.
 
 ## Plugin Settings
 
