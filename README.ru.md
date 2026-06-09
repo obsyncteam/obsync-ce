@@ -1,11 +1,15 @@
-# obsync Community Edition
+# Синхронизация Obsidian self-hosted
 
 [English version](README.md)
 
 [![Лицензия: AGPL-3.0-only](https://img.shields.io/badge/license-AGPL--3.0--only-blue.svg)](LICENSE)
 [![Версия](https://img.shields.io/badge/version-1.6.8-green.svg)](server/package.json)
 
-Сервер синхронизации для плагина obsync Obsidian.
+Obsync Community Edition - бесплатная открытая self-hosted синхронизация для тех, кто хочет держать сервер у себя: VPS или NAS, плагин на устройствах, токен. Инженерная модель с главной задачей - Obsidian больше не привязан к одному устройству, поддерживает быструю и стабильную live-sync синхронизацию, историю версий, синхронизацию больших файлов.
+
+Простой и быстрый старт: пара команд в Docker и несколько действий в настройках приложения.
+
+Официальный сайт проекта: [obsync.ru](https://obsync.ru/?utm_source=github&utm_medium=readme) (международная версия в разработке).
 
 ## Требования
 
