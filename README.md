@@ -9,7 +9,7 @@ Obsync Community Edition is a free, open self-hosted sync option for users who w
 
 Quick start: a few Docker commands and a few settings in the Obsidian plugin.
 
-Official project site: [obsync.ru](https://obsync.ru/?utm_source=github&utm_medium=readme) (the international version is in development).
+Official project site: [obsync.ru](https://obsync.ru/?utm_source=github&utm_medium=repo_readme) (the international version is in development).
 
 ## Requirements
 
@@ -184,7 +184,7 @@ mkdir -p /path/to/vault/.obsidian/plugins/obsync
 cp main.js manifest.json styles.css /path/to/vault/.obsidian/plugins/obsync/
 ```
 
-After installing either way, restart Obsidian or reload the app. Enable obsync in Community plugins.
+After installing either way, restart Obsidian or reload the app. Enable Obsync in Community plugins.
 
 ## Plugin Settings
 
@@ -235,7 +235,7 @@ Click `Sync`. Wait until the initial download succeeds.
 
 `Open note history` shows Markdown versions retained by the server.
 
-For Markdown conflicts, obsync leaves the local note unchanged. Open history, compare versions and restore the version to keep. Binary conflicts can create conflict copies.
+For Markdown conflicts, Obsync leaves the local note unchanged. Open history, compare versions and restore the version to keep. Binary conflicts can create conflict copies.
 
 ## Update
 
@@ -252,19 +252,19 @@ docker compose up -d --build
 
 ## License
 
-obsync Community Edition is licensed under `AGPL-3.0-only`.
+Obsync Community Edition is licensed under `AGPL-3.0-only`.
 
 The full license text is in [LICENSE](LICENSE).
 
 You can:
 
-- run obsync Community Edition on your own server;
+- run Obsync Community Edition on your own server;
 - use it to sync Obsidian vaults;
 - read and modify the source code;
 - share copies of the software;
 - publish modified versions under the same license terms.
 
-obsync includes a server component. `AGPL-3.0-only` has network-use requirements.
+Obsync includes a server component. `AGPL-3.0-only` has network-use requirements.
 
 If you modify the server and provide access to the modified version over a network, users of that service must be able to receive the corresponding source code under the AGPL terms.
 
