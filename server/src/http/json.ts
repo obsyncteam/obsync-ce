@@ -80,6 +80,26 @@ export async function readJsonBody(
   }
 }
 
+export async function readRawBody(
+  request: IncomingMessage,
+  maxBytes = 1024 * 1024,
+): Promise<Buffer> {
+  assertContentLengthWithinLimit(request, maxBytes);
+  const chunks: Buffer[] = [];
+  let sizeBytes = 0;
+
+  for await (const chunk of request) {
+    const buffer = Buffer.from(chunk);
+    sizeBytes += buffer.byteLength;
+    if (sizeBytes > maxBytes) {
+      throw new BodyTooLargeError();
+    }
+    chunks.push(buffer);
+  }
+
+  return Buffer.concat(chunks);
+}
+
 function assertContentLengthWithinLimit(
   request: IncomingMessage,
   maxBytes: number,

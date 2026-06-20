@@ -17,7 +17,7 @@ services:
   obsync-server:
     build:
       context: ./server
-    image: obsync-server:1.6.8
+    image: obsync-server:1.6.20
     restart: unless-stopped
     environment:
       NODE_ENV: production

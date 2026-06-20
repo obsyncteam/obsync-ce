@@ -29,11 +29,6 @@ export function createSyncSocketServer(deps: SyncSocketDependencies): WebSocketS
   const sessions = new Set<ClientSession>();
 
   server.on("connection", async (socket, request) => {
-    if (sessions.size >= deps.config.maxWsSessions) {
-      socket.close(1013, "too many websocket sessions");
-      return;
-    }
-
     const url = new URL(request.url ?? "/", "http://localhost");
     const vaultId = url.searchParams.get("vaultId") ?? "default";
     const deviceId = url.searchParams.get("deviceId") ?? "anonymous";

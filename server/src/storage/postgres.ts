@@ -1,19 +1,13 @@
 import pg from "pg";
-import type { DatabaseConfig } from "../config.js";
 
 const { Pool } = pg;
 
 export type PostgresPool = pg.Pool;
 export type PostgresClient = pg.PoolClient;
 
-export function createPostgresPool(database: DatabaseConfig): PostgresPool {
+export function createPostgresPool(databaseUrl: string): PostgresPool {
   return new Pool({
-    connectionString: database.connectionString,
-    host: database.host,
-    port: database.port,
-    database: database.database,
-    user: database.user,
-    password: database.password,
+    connectionString: databaseUrl,
     max: 10,
     idleTimeoutMillis: 30_000,
     connectionTimeoutMillis: 10_000,
@@ -33,15 +27,8 @@ export async function runMigrations(pool: PostgresPool): Promise<void> {
     )
   `);
 
-  const lockClient = await pool.connect();
-  try {
-    await lockClient.query(
-      "select pg_advisory_lock(hashtextextended($1, 0))",
-      ["obsync:schema_migrations"],
-    );
-
-    await migrate(pool, 1, "initial_sync_schema", `
-      create table if not exists vaults (
+  await migrate(pool, 1, "initial_sync_schema", `
+    create table if not exists vaults (
       id text primary key,
       name text not null,
       created_at timestamptz not null default now(),
@@ -68,7 +55,8 @@ export async function runMigrations(pool: PostgresPool): Promise<void> {
       deleted_at timestamptz,
       updated_seq bigint,
       updated_at timestamptz not null default now(),
-      primary key (vault_id, file_id)
+      primary key (vault_id, file_id),
+      unique (vault_id, path)
     );
 
     create table if not exists operations (
@@ -113,7 +101,7 @@ export async function runMigrations(pool: PostgresPool): Promise<void> {
     );
   `);
 
-    await migrate(pool, 2, "current_file_storage", `
+  await migrate(pool, 2, "current_file_storage", `
     alter table files
       add column if not exists storage_key text,
       add column if not exists storage_kind text,
@@ -123,7 +111,7 @@ export async function runMigrations(pool: PostgresPool): Promise<void> {
       on files(vault_id, path);
   `);
 
-    await migrate(pool, 3, "sync_hardening_indexes", `
+  await migrate(pool, 3, "sync_hardening_indexes", `
     create index if not exists operations_vault_file_seq_idx
       on operations(vault_id, file_id, server_seq desc);
 
@@ -143,7 +131,7 @@ export async function runMigrations(pool: PostgresPool): Promise<void> {
       on tombstones(vault_id, deleted_at);
   `);
 
-    await migrate(pool, 4, "storage_quota_ledger", `
+  await migrate(pool, 4, "storage_quota_ledger", `
     create table if not exists vault_quotas (
       vault_id text primary key references vaults(id) on delete cascade,
       quota_bytes bigint,
@@ -176,6 +164,7 @@ export async function runMigrations(pool: PostgresPool): Promise<void> {
       source text not null,
       delta_logical_bytes bigint not null default 0,
       delta_physical_bytes bigint not null default 0,
+      delta_published_bytes bigint not null default 0,
       delta_reserved_bytes bigint not null default 0,
       reason text not null,
       ref_id text,
@@ -194,7 +183,7 @@ export async function runMigrations(pool: PostgresPool): Promise<void> {
       where orphaned_at is not null;
   `);
 
-    await migrate(pool, 5, "upload_session_metadata", `
+  await migrate(pool, 5, "upload_session_metadata", `
     create table if not exists upload_sessions (
       id text primary key,
       vault_id text not null references vaults(id) on delete cascade,
@@ -241,7 +230,7 @@ export async function runMigrations(pool: PostgresPool): Promise<void> {
     );
   `);
 
-    await migrate(pool, 6, "markdown_version_history", `
+  await migrate(pool, 6, "markdown_version_history", `
     create table if not exists markdown_versions (
       vault_id text not null references vaults(id) on delete cascade,
       file_id text not null,
@@ -268,21 +257,13 @@ export async function runMigrations(pool: PostgresPool): Promise<void> {
       on markdown_versions(vault_id, file_id, server_seq desc);
   `);
 
-    await migrate(pool, 7, "active_file_path_unique", `
-    alter table files
-      drop constraint if exists files_vault_id_path_key;
+  await migrate(pool, 7, "active_file_path_unique", `
+    alter table files drop constraint if exists files_vault_id_path_key;
 
     create unique index if not exists files_vault_path_active_unique_idx
       on files(vault_id, path)
       where deleted_at is null;
   `);
-  } finally {
-    await lockClient.query(
-      "select pg_advisory_unlock(hashtextextended($1, 0))",
-      ["obsync:schema_migrations"],
-    ).catch(() => undefined);
-    lockClient.release();
-  }
 }
 
 async function migrate(
@@ -303,11 +284,7 @@ async function migrate(
     if (existing.rowCount === 0) {
       await client.query(sql);
       await client.query(
-        `
-          insert into schema_migrations(version, name)
-          values ($1, $2)
-          on conflict (version) do nothing
-        `,
+        "insert into schema_migrations(version, name) values ($1, $2)",
         [version, name],
       );
     }

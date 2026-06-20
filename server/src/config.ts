@@ -1,19 +1,11 @@
 export type BlobStoreKind = "filesystem" | "s3";
 
-export interface DatabaseConfig {
-  connectionString?: string;
-  host?: string;
-  port?: number;
-  database?: string;
-  user?: string;
-  password?: string;
-}
-
 export interface ServerConfig {
   host: string;
   port: number;
-  database: DatabaseConfig;
+  databaseUrl: string;
   authToken: string;
+  enableWebRoutes: boolean;
   blobStore: BlobStoreKind;
   dataDir: string;
   allowedOrigins: string[];
@@ -21,8 +13,6 @@ export interface ServerConfig {
   maxJsonBodyBytes: number;
   maxDirectUploadBytes: number;
   maxWsMessageBytes: number;
-  maxHttpConnections: number;
-  maxWsSessions: number;
   s3?: {
     endpoint?: string;
     region: string;
@@ -117,21 +107,21 @@ function optionalCsv(name: string): string[] {
     .filter(Boolean);
 }
 
-function loadDatabaseConfig(): DatabaseConfig {
+function loadDatabaseUrl(): string {
   const connectionString = optionalEnv("DATABASE_URL");
   if (connectionString) {
     rejectPlaceholderValue("DATABASE_URL", connectionString);
-    return { connectionString };
+    return connectionString;
   }
 
+  const host = optionalEnv("OBSYNC_POSTGRES_HOST") ?? "postgres";
+  const port = optionalNumber("OBSYNC_POSTGRES_PORT", 5432);
+  const database = optionalEnv("OBSYNC_POSTGRES_DB") ?? "obsync";
+  const user = optionalEnv("OBSYNC_POSTGRES_USER") ?? "obsync";
   const password = requiredSecretEnv("OBSYNC_POSTGRES_PASSWORD", 16);
-  return {
-    host: optionalEnv("OBSYNC_POSTGRES_HOST") ?? "postgres",
-    port: optionalNumber("OBSYNC_POSTGRES_PORT", 5432),
-    database: optionalEnv("OBSYNC_POSTGRES_DB") ?? "obsync",
-    user: optionalEnv("OBSYNC_POSTGRES_USER") ?? "obsync",
-    password,
-  };
+
+  return `postgres://${encodeURIComponent(user)}:${encodeURIComponent(password)}` +
+    `@${encodeURIComponent(host)}:${port}/${encodeURIComponent(database)}`;
 }
 
 export function loadConfig(): ServerConfig {
@@ -146,8 +136,9 @@ export function loadConfig(): ServerConfig {
   return {
     host: optionalEnv("OBSYNC_HOST") ?? "0.0.0.0",
     port: optionalNumber("OBSYNC_PORT", 4444),
-    database: loadDatabaseConfig(),
+    databaseUrl: loadDatabaseUrl(),
     authToken: requiredSecretEnv("OBSYNC_AUTH_TOKEN", 32),
+    enableWebRoutes: optionalBoolean("OBSYNC_ENABLE_WEB_ROUTES", true),
     blobStore,
     dataDir: optionalEnv("OBSYNC_DATA_DIR") ?? "/data",
     allowedOrigins: optionalCsv("OBSYNC_ALLOWED_ORIGINS"),
@@ -155,8 +146,6 @@ export function loadConfig(): ServerConfig {
     maxJsonBodyBytes: optionalNumber("OBSYNC_MAX_JSON_BODY_BYTES", 1024 * 1024),
     maxDirectUploadBytes: optionalNumber("OBSYNC_MAX_DIRECT_UPLOAD_BYTES", 32 * 1024 * 1024),
     maxWsMessageBytes: optionalNumber("OBSYNC_MAX_WS_MESSAGE_BYTES", 1024 * 1024),
-    maxHttpConnections: optionalNumber("OBSYNC_MAX_HTTP_CONNECTIONS", 1024),
-    maxWsSessions: optionalNumber("OBSYNC_MAX_WS_SESSIONS", 256),
     s3: hasS3
       ? {
           endpoint: s3Endpoint,

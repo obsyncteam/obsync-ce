@@ -1,5 +1,5 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, rm } from "node:fs/promises";
 import { createWriteStream } from "node:fs";
 import { join } from "node:path";
@@ -22,7 +22,7 @@ import {
 } from "../sync/repository.js";
 import { appendOperationSchema } from "../sync/operation-schema.js";
 import { MARKDOWN_VERSION_MAX_BYTES } from "../sync/history-limits.js";
-import { InvalidVaultPathError, validateSyncVaultPath } from "../sync/path-policy.js";
+import { InvalidVaultPathError, validateSyncVaultPath, validateVaultPath } from "../sync/path-policy.js";
 import { buildCompatibilityResult } from "../sync/protocol.js";
 import { withVaultMutationLock } from "../sync/vault-mutation-lock.js";
 import {
@@ -34,13 +34,8 @@ import {
   sendError,
   sendJson,
 } from "./json.js";
+import { servePublicWebRoute } from "./public-web.js";
 import { handleUploadRoutes, isUploadHttpError } from "./uploads.js";
-import {
-  endStream,
-  onceDrainOrError,
-  throwTrackedStreamError,
-  trackWriteStreamError,
-} from "./stream-utils.js";
 
 const ensureVaultSchema = z.object({
   vaultId: z.string().min(1).optional(),
@@ -73,15 +68,11 @@ export function createRouter(deps: RouterDependencies) {
         return;
       }
 
-      if (request.method === "GET" && url.pathname === "/health") {
-        sendJson(response, 200, {
-          ok: true,
-          service: "obsync-server",
-        });
+      if (await servePublicWebRoute(request, response, url.pathname, deps.config)) {
         return;
       }
 
-      if (request.method === "GET" && url.pathname === "/ready") {
+      if (request.method === "GET" && url.pathname === "/health") {
         await deps.dbReady();
         sendJson(response, 200, {
           ok: true,
@@ -140,6 +131,20 @@ export function createRouter(deps: RouterDependencies) {
         return;
       }
 
+      if (request.method === "GET" && url.pathname === "/api/v1/tombstones") {
+        const vaultId = requiredSearchParam(url, "vaultId");
+        const path = url.searchParams.get("path");
+        const page = await deps.repository.tombstonesPage({
+          vaultId,
+          cursor: optionalIntegerSearchParam(url, "cursor"),
+          limit: optionalPositiveIntegerSearchParam(url, "limit"),
+          path: path ? validateSyncVaultPath(path) : undefined,
+          fileId: url.searchParams.get("fileId") ?? undefined,
+        });
+        sendJson(response, 200, { ok: true, ...page });
+        return;
+      }
+
       if (request.method === "GET" && url.pathname === "/api/v1/ops") {
         const vaultId = requiredSearchParam(url, "vaultId");
         const since = Number(url.searchParams.get("since") ?? "0");
@@ -159,7 +164,10 @@ export function createRouter(deps: RouterDependencies) {
 
       if (request.method === "GET" && url.pathname === "/api/v1/history") {
         const vaultId = requiredSearchParam(url, "vaultId");
-        const path = validateSyncVaultPath(requiredSearchParam(url, "path"));
+        const path = validateVaultPath(requiredSearchParam(url, "path"), {
+          allowObsidianConfig: true,
+          allowObsidianPlugins: true,
+        });
         const page = await deps.repository.historyPage({
           vaultId,
           path,
@@ -172,7 +180,10 @@ export function createRouter(deps: RouterDependencies) {
 
       if (request.method === "GET" && url.pathname === "/api/v1/history/content") {
         const vaultId = requiredSearchParam(url, "vaultId");
-        const path = validateSyncVaultPath(requiredSearchParam(url, "path"));
+        const path = validateVaultPath(requiredSearchParam(url, "path"), {
+          allowObsidianConfig: true,
+          allowObsidianPlugins: true,
+        });
         const serverSeq = optionalPositiveIntegerSearchParam(url, "serverSeq");
         if (!serverSeq) {
           sendError(response, 400, "missing serverSeq");
@@ -281,7 +292,7 @@ export function createRouter(deps: RouterDependencies) {
               return await deps.repository.commitUploadedFile({
                 vaultId,
                 deviceId,
-                opId: `${deviceId}:direct-upload:${Date.now()}:${Math.random().toString(16).slice(2)}`,
+                opId: `${deviceId}:direct-upload:${randomUUID()}`,
                 fileId,
                 path,
                 kind,
@@ -325,7 +336,10 @@ export function createRouter(deps: RouterDependencies) {
 
       if (request.method === "GET" && url.pathname === "/api/v1/files/content") {
         const vaultId = requiredSearchParam(url, "vaultId");
-        const path = validateSyncVaultPath(requiredSearchParam(url, "path"));
+        const path = validateVaultPath(requiredSearchParam(url, "path"), {
+          allowObsidianConfig: true,
+          allowObsidianPlugins: true,
+        });
         const file = await deps.repository.fileByPath(vaultId, path);
 
         if (!file) {
@@ -609,15 +623,13 @@ async function writeRequestBodyToTemp(
   const hash = createHash("sha256");
   const filePath = join(
     tempDir,
-    `${Date.now()}-${Math.random().toString(16).slice(2)}.upload`,
+    `${Date.now()}-${randomUUID()}.upload`,
   );
   const output = createWriteStream(filePath, { flags: "wx" });
-  const trackedError = trackWriteStreamError(output);
   let sizeBytes = 0;
 
   try {
     for await (const chunk of request) {
-      throwTrackedStreamError(trackedError);
       const buffer = Buffer.from(chunk);
       sizeBytes += buffer.byteLength;
       if (sizeBytes > maxBytes) {
@@ -630,8 +642,12 @@ async function writeRequestBodyToTemp(
       }
     }
 
-    throwTrackedStreamError(trackedError);
-    await endStream(output);
+    await new Promise<void>((resolve, reject) => {
+      output.end((error?: Error | null) => {
+        if (error) reject(error);
+        else resolve();
+      });
+    });
 
     return {
       filePath,
@@ -644,4 +660,24 @@ async function writeRequestBodyToTemp(
     await rm(filePath, { force: true });
     throw error;
   }
+}
+
+function onceDrainOrError(output: NodeJS.WritableStream): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const cleanup = () => {
+      output.removeListener("drain", onDrain);
+      output.removeListener("error", onError);
+    };
+    const onDrain = () => {
+      cleanup();
+      resolve();
+    };
+    const onError = (error: Error) => {
+      cleanup();
+      reject(error);
+    };
+
+    output.once("drain", onDrain);
+    output.once("error", onError);
+  });
 }

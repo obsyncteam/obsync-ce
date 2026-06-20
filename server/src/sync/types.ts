@@ -21,7 +21,7 @@ export interface OperationPage {
   hasMore: boolean;
 }
 
-export type HistorySource = "device" | "unknown";
+export type HistorySource = "device" | "rest" | "mcp" | "unknown";
 
 export interface HistoryEntry {
   serverSeq: number;
@@ -86,6 +86,22 @@ export interface InlineFileContent {
 export interface ManifestPage {
   manifest: FileEntry[];
   nextCursor?: string;
+  hasMore: boolean;
+}
+
+export interface TombstoneRecord {
+  vaultId: string;
+  fileId: string;
+  path: string;
+  opId: string;
+  deviceId: string;
+  deletedSeq?: number;
+  deletedAt: string;
+}
+
+export interface TombstonePage {
+  tombstones: TombstoneRecord[];
+  nextCursor?: number;
   hasMore: boolean;
 }
 

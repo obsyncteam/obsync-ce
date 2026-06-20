@@ -16,6 +16,8 @@ import type {
   ReserveStorageInput,
   StorageReservationRecord,
   StorageUsageRecord,
+  TombstonePage,
+  TombstoneRecord,
   UploadChunkRecord,
   UploadSessionRecord,
   UpdateFileStorageInput,
@@ -288,6 +290,44 @@ export class SyncRepository {
     return {
       manifest,
       nextCursor: manifest.at(-1)?.path,
+      hasMore: result.rows.length > limit,
+    };
+  }
+
+  async tombstonesPage(input: {
+    vaultId: string;
+    cursor?: number;
+    limit?: number;
+    path?: string;
+    fileId?: string;
+  }): Promise<TombstonePage> {
+    const limit = this.normalizeLimit(input.limit);
+    const result = await this.pool.query(
+      `
+        select *
+        from tombstones
+        where vault_id = $1
+          and ($2::bigint is null or deleted_seq > $2)
+          and ($3::text is null or path = $3)
+          and ($4::text is null or file_id = $4)
+        order by deleted_seq asc nulls last, deleted_at asc, file_id asc
+        limit $5
+      `,
+      [
+        input.vaultId,
+        input.cursor ?? null,
+        input.path ?? null,
+        input.fileId ?? null,
+        limit + 1,
+      ],
+    );
+
+    const rows = result.rows.slice(0, limit);
+    const tombstones = rows.map(mapTombstone);
+
+    return {
+      tombstones,
+      nextCursor: tombstones.at(-1)?.deletedSeq,
       hasMore: result.rows.length > limit,
     };
   }
@@ -1647,6 +1687,7 @@ export class SyncRepository {
       source: string;
       deltaLogicalBytes?: number;
       deltaPhysicalBytes?: number;
+      deltaPublishedBytes?: number;
       deltaReservedBytes?: number;
       reason: string;
       refId?: string;
@@ -1659,17 +1700,19 @@ export class SyncRepository {
           source,
           delta_logical_bytes,
           delta_physical_bytes,
+          delta_published_bytes,
           delta_reserved_bytes,
           reason,
           ref_id
         )
-        values ($1, $2, $3, $4, $5, $6, $7)
+        values ($1, $2, $3, $4, $5, $6, $7, $8)
       `,
       [
         input.vaultId,
         input.source,
         input.deltaLogicalBytes ?? 0,
         input.deltaPhysicalBytes ?? 0,
+        input.deltaPublishedBytes ?? 0,
         input.deltaReservedBytes ?? 0,
         input.reason,
         input.refId,
@@ -1867,6 +1910,18 @@ function mapFileEntry(row: Record<string, unknown>): FileEntry {
   };
 }
 
+function mapTombstone(row: Record<string, unknown>): TombstoneRecord {
+  return {
+    vaultId: String(row.vault_id),
+    fileId: String(row.file_id),
+    path: String(row.path),
+    opId: String(row.op_id),
+    deviceId: String(row.device_id),
+    deletedSeq: optionalNumber(row.deleted_seq),
+    deletedAt: dateString(row.deleted_at),
+  };
+}
+
 function mapStorageReservation(row: Record<string, unknown>): StorageReservationRecord {
   const status = String(row.status);
   if (
@@ -1976,7 +2031,9 @@ function numberPayload(payload: Record<string, unknown>, key: string): number | 
 }
 
 function historySource(deviceId: string, opId: string): HistoryEntry["source"] {
-  void opId;
+  const value = `${deviceId} ${opId}`.toLowerCase();
+  if (value.includes("mcp")) return "mcp";
+  if (value.includes("api") || value.includes("rest")) return "rest";
   if (deviceId) return "device";
   return "unknown";
 }

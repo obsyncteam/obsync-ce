@@ -1,17 +1,25 @@
 import { createReadStream } from "node:fs";
-import { copyFile, mkdir, rename, rm, stat, unlink } from "node:fs/promises";
+import { copyFile, mkdir, readFile, rename, rm, stat, unlink, writeFile } from "node:fs/promises";
 import { dirname, join, normalize } from "node:path";
 import type {
   BlobFileWriteInput,
   BlobReadRange,
+  BlobReadResult,
   BlobReadStreamResult,
   BlobStore,
+  BlobWriteInput,
 } from "./blob-store.js";
 
 export class FilesystemBlobStore implements BlobStore {
   readonly kind = "filesystem" as const;
 
   constructor(private readonly rootDir: string) {}
+
+  async put(input: BlobWriteInput): Promise<void> {
+    const path = this.resolveKey(input.key);
+    await mkdir(dirname(path), { recursive: true });
+    await writeFile(path, input.body);
+  }
 
   async putFile(input: BlobFileWriteInput): Promise<void> {
     const path = this.resolveKey(input.key);
@@ -26,6 +34,16 @@ export class FilesystemBlobStore implements BlobStore {
 
       await copyFile(input.filePath, path);
       await unlink(input.filePath);
+    }
+  }
+
+  async get(key: string): Promise<BlobReadResult | undefined> {
+    try {
+      const body = await readFile(this.resolveKey(key));
+      return { body };
+    } catch (error) {
+      if (isNodeError(error) && error.code === "ENOENT") return undefined;
+      throw error;
     }
   }
 

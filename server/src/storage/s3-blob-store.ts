@@ -10,8 +10,10 @@ import { Readable } from "node:stream";
 import type {
   BlobFileWriteInput,
   BlobReadRange,
+  BlobReadResult,
   BlobReadStreamResult,
   BlobStore,
+  BlobWriteInput,
 } from "./blob-store.js";
 
 export interface S3BlobStoreConfig {
@@ -44,6 +46,17 @@ export class S3BlobStore implements BlobStore {
     this.client = new S3Client(clientConfig);
   }
 
+  async put(input: BlobWriteInput): Promise<void> {
+    await this.client.send(
+      new PutObjectCommand({
+        Bucket: this.config.bucket,
+        Key: input.key,
+        Body: input.body,
+        ContentType: input.contentType,
+      }),
+    );
+  }
+
   async putFile(input: BlobFileWriteInput): Promise<void> {
     await this.client.send(
       new PutObjectCommand({
@@ -53,6 +66,23 @@ export class S3BlobStore implements BlobStore {
         ContentType: input.contentType,
       }),
     );
+  }
+
+  async get(key: string): Promise<BlobReadResult | undefined> {
+    const result = await this.getObject(key);
+    if (!result) return undefined;
+
+    if (!result.Body) return undefined;
+
+    const chunks: Buffer[] = [];
+    for await (const chunk of result.Body as AsyncIterable<Uint8Array>) {
+      chunks.push(Buffer.from(chunk));
+    }
+
+    return {
+      body: Buffer.concat(chunks),
+      contentType: result.ContentType,
+    };
   }
 
   async getStream(
