@@ -1,8 +1,8 @@
-export const OBSYNC_SERVER_VERSION = "1.6.20.3";
+export const OBSYNC_SERVER_VERSION = "1.6.25";
 export const OBSYNC_PROTOCOL_VERSION = 1;
 export const OBSYNC_MIN_CLIENT_PROTOCOL_VERSION = 1;
 export const OBSYNC_MIN_CLIENT_VERSION = "1.6.8";
-export const OBSYNC_LATEST_CLIENT_VERSION = "1.6.20.3";
+export const OBSYNC_LATEST_CLIENT_VERSION = "1.6.25";
 
 export const OBSYNC_CAPABILITIES = [
   "postgres-metadata",

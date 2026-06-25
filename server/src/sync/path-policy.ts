@@ -1,6 +1,7 @@
 export interface VaultPathPolicy {
   allowObsidianConfig?: boolean;
   allowObsidianPlugins?: boolean;
+  allowLongSegments?: boolean;
 }
 
 export const SYNC_VAULT_PATH_POLICY: VaultPathPolicy = {
@@ -18,6 +19,7 @@ export class InvalidVaultPathError extends Error {
 }
 
 const MAX_VAULT_PATH_LENGTH = 4096;
+const MAX_VAULT_PATH_SEGMENT_BYTES = 255;
 const WINDOWS_DRIVE_PATH = /^[a-zA-Z]:[\\/]/;
 const CONTROL_CHARS = /[\u0000-\u001f\u007f]/;
 const ENCODED_TRAVERSAL = /%(?:2e|2f|5c)/i;
@@ -70,6 +72,12 @@ function invalidVaultPathReason(
   const segments = normalized.split("/");
   if (segments.some((segment) => !segment || segment === "." || segment === "..")) {
     return "invalid vault path: unsafe segment";
+  }
+  if (
+    !policy.allowLongSegments &&
+    segments.some((segment) => Buffer.byteLength(segment, "utf8") > MAX_VAULT_PATH_SEGMENT_BYTES)
+  ) {
+    return "invalid vault path: segment too long";
   }
 
   if (isBlockedInternalPath(normalized)) return "invalid vault path: internal obsync path";

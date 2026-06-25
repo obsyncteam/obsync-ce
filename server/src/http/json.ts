@@ -9,41 +9,12 @@ export class BodyTooLargeError extends Error {
   }
 }
 
-export class InvalidJsonError extends Error {
-  readonly statusCode = 400;
-
-  constructor(message = "invalid json") {
-    super(message);
-    this.name = "InvalidJsonError";
-  }
-}
-
-export function allowedCorsOrigin(
-  request: IncomingMessage,
-  allowedOrigins: readonly string[],
-): string | undefined {
-  const origin = request.headers.origin;
-  if (!origin || Array.isArray(origin)) return undefined;
-  return allowedOrigins.includes(origin) ? origin : undefined;
-}
-
-export function applyCorsHeaders(response: ServerResponse, origin?: string): void {
-  if (origin) {
-    response.setHeader("access-control-allow-origin", origin);
-    response.setHeader("vary", "origin");
-  }
+export function applyCorsHeaders(response: ServerResponse): void {
+  response.setHeader("access-control-allow-origin", "*");
   response.setHeader("access-control-allow-methods", "GET,HEAD,POST,PUT,DELETE,OPTIONS");
   response.setHeader(
     "access-control-allow-headers",
-    [
-      "authorization",
-      "content-type",
-      "x-obsync-token",
-      "x-obsync-client-version",
-      "x-obsync-protocol-version",
-      "x-obsync-chunk-sha256",
-      "range",
-    ].join(","),
+    "authorization,content-type,x-obsync-token,x-obsync-chunk-sha256,range",
   );
   response.setHeader(
     "access-control-expose-headers",
@@ -73,11 +44,7 @@ export async function readJsonBody(
   const raw = Buffer.concat(chunks).toString("utf8");
   if (!raw.trim()) return {};
 
-  try {
-    return JSON.parse(raw);
-  } catch {
-    throw new InvalidJsonError();
-  }
+  return JSON.parse(raw);
 }
 
 export async function readRawBody(
@@ -130,9 +97,11 @@ export function sendError(
   response: ServerResponse,
   statusCode: number,
   message: string,
+  errorCode?: string,
 ): void {
   sendJson(response, statusCode, {
     ok: false,
     error: message,
+    ...(errorCode ? { errorCode } : {}),
   });
 }

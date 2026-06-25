@@ -3,7 +3,7 @@
 [Русская версия](README.ru.md)
 
 [![License: AGPL-3.0-only](https://img.shields.io/badge/license-AGPL--3.0--only-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-1.6.20.3-green.svg)](server/package.json)
+[![Version](https://img.shields.io/badge/version-1.6.25-green.svg)](server/package.json)
 
 Obsync Community Edition is a free, open self-hosted sync option for users who want to keep the server on their own infrastructure: a VPS or NAS, the plugin on their devices, and a connection token. It is an engineering model with one main job: Obsidian is no longer tied to one device. It supports fast and stable live sync, version history, and large file synchronization.
 
@@ -71,7 +71,7 @@ Expected ready response:
 
 ## Environment
 
-`compose.yml` builds `obsync-server:1.6.20.3` from `./server` and starts PostgreSQL 16.
+`compose.yml` builds `obsync-server:1.6.25` from `./server` and starts PostgreSQL 16.
 
 | Variable | Required | Description |
 | --- | --- | --- |

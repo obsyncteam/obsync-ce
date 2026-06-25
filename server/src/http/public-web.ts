@@ -8,6 +8,6 @@ export async function servePublicWebRoute(
   config: ServerConfig,
 ): Promise<boolean> {
   if (!config.enableWebRoutes) return false;
-  // Community Edition stays sync-only; website pages are served by a separate product.
+  // Public web pages live in commercial/web. The Community sync server must stay sync-only.
   return false;
 }

@@ -25,15 +25,7 @@ import { MARKDOWN_VERSION_MAX_BYTES } from "../sync/history-limits.js";
 import { InvalidVaultPathError, validateSyncVaultPath, validateVaultPath } from "../sync/path-policy.js";
 import { buildCompatibilityResult } from "../sync/protocol.js";
 import { withVaultMutationLock } from "../sync/vault-mutation-lock.js";
-import {
-  allowedCorsOrigin,
-  applyCorsHeaders,
-  BodyTooLargeError,
-  InvalidJsonError,
-  readJsonBody,
-  sendError,
-  sendJson,
-} from "./json.js";
+import { applyCorsHeaders, BodyTooLargeError, readJsonBody, sendError, sendJson } from "./json.js";
 import { servePublicWebRoute } from "./public-web.js";
 import { handleUploadRoutes, isUploadHttpError } from "./uploads.js";
 
@@ -53,15 +45,9 @@ export interface RouterDependencies {
 export function createRouter(deps: RouterDependencies) {
   return async (request: IncomingMessage, response: ServerResponse): Promise<void> => {
     const url = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`);
-    const corsOrigin = allowedCorsOrigin(request, deps.config.allowedOrigins);
-    if (corsOrigin) applyCorsHeaders(response, corsOrigin);
 
     try {
       if (request.method === "OPTIONS") {
-        if (request.headers.origin && !corsOrigin) {
-          sendError(response, 403, "origin is not allowed");
-          return;
-        }
         applyCorsHeaders(response);
         response.writeHead(204);
         response.end();
@@ -138,7 +124,11 @@ export function createRouter(deps: RouterDependencies) {
           vaultId,
           cursor: optionalIntegerSearchParam(url, "cursor"),
           limit: optionalPositiveIntegerSearchParam(url, "limit"),
-          path: path ? validateSyncVaultPath(path) : undefined,
+          path: path ? validateVaultPath(path, {
+            allowObsidianConfig: true,
+            allowObsidianPlugins: true,
+            allowLongSegments: true,
+          }) : undefined,
           fileId: url.searchParams.get("fileId") ?? undefined,
         });
         sendJson(response, 200, { ok: true, ...page });
@@ -167,6 +157,7 @@ export function createRouter(deps: RouterDependencies) {
         const path = validateVaultPath(requiredSearchParam(url, "path"), {
           allowObsidianConfig: true,
           allowObsidianPlugins: true,
+          allowLongSegments: true,
         });
         const page = await deps.repository.historyPage({
           vaultId,
@@ -183,6 +174,7 @@ export function createRouter(deps: RouterDependencies) {
         const path = validateVaultPath(requiredSearchParam(url, "path"), {
           allowObsidianConfig: true,
           allowObsidianPlugins: true,
+          allowLongSegments: true,
         });
         const serverSeq = optionalPositiveIntegerSearchParam(url, "serverSeq");
         if (!serverSeq) {
@@ -339,6 +331,7 @@ export function createRouter(deps: RouterDependencies) {
         const path = validateVaultPath(requiredSearchParam(url, "path"), {
           allowObsidianConfig: true,
           allowObsidianPlugins: true,
+          allowLongSegments: true,
         });
         const file = await deps.repository.fileByPath(vaultId, path);
 
@@ -425,32 +418,28 @@ export function createRouter(deps: RouterDependencies) {
         return;
       }
 
-      if (
-        error instanceof BodyTooLargeError ||
-        error instanceof InvalidJsonError ||
-        error instanceof InvalidVaultPathError
-      ) {
+      if (error instanceof BodyTooLargeError || error instanceof InvalidVaultPathError) {
         sendError(response, error.statusCode, error.message);
         return;
       }
 
       if (error instanceof OperationIdConflictError) {
-        sendError(response, 409, error.message);
+        sendError(response, 409, error.message, "operation_id_conflict");
         return;
       }
 
       if (error instanceof OperationPreconditionFailedError) {
-        sendError(response, 409, error.message);
+        sendError(response, 409, error.message, "operation_precondition_failed");
         return;
       }
 
       if (error instanceof FilePathConflictError) {
-        sendError(response, 409, error.message);
+        sendError(response, 409, error.message, "file_path_conflict");
         return;
       }
 
       if (error instanceof MissingFileContentError) {
-        sendError(response, 400, error.message);
+        sendError(response, 400, error.message, "missing_file_content");
         return;
       }
 
@@ -458,6 +447,7 @@ export function createRouter(deps: RouterDependencies) {
         sendJson(response, 413, {
           ok: false,
           error: "storage quota exceeded",
+          errorCode: "storage_quota_exceeded",
           vaultId: error.vaultId,
           quotaBytes: error.quotaBytes,
           logicalBytes: error.logicalBytes,

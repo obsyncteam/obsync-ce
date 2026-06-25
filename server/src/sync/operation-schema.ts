@@ -7,6 +7,13 @@ const syncVaultPathSchema = z.string().min(1).transform((path) => (
     allowObsidianPlugins: true,
   })
 ));
+const syncVaultSourcePathSchema = z.string().min(1).transform((path) => (
+  validateVaultPath(path, {
+    allowLongSegments: true,
+    allowObsidianConfig: true,
+    allowObsidianPlugins: true,
+  })
+));
 
 const opIdSchema = z.string().min(1).max(256);
 const deviceIdSchema = z.string().min(1).max(256);
@@ -22,6 +29,9 @@ const baseOperationSchema = z.object({
   deviceId: deviceIdSchema.optional(),
   fileId: fileIdSchema.optional(),
   path: syncVaultPathSchema,
+});
+const sourceOperationSchema = baseOperationSchema.extend({
+  path: syncVaultSourcePathSchema,
 });
 
 const fileUpsertSchema = baseOperationSchema.extend({
@@ -46,7 +56,7 @@ const folderUpsertSchema = baseOperationSchema.extend({
   }).strict().default({ kind: "folder" }),
 });
 
-const deleteSchema = baseOperationSchema.extend({
+const deleteSchema = sourceOperationSchema.extend({
   operationType: z.literal("delete"),
   payload: z.object({
     kind: kindSchema.optional(),
@@ -55,7 +65,7 @@ const deleteSchema = baseOperationSchema.extend({
   }).strict().default({}),
 });
 
-const renameSchema = baseOperationSchema.extend({
+const renameSchema = sourceOperationSchema.extend({
   operationType: z.literal("rename"),
   payload: z.object({
     kind: kindSchema.optional(),

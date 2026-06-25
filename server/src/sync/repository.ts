@@ -949,19 +949,17 @@ export class SyncRepository {
     operation: OperationRecord,
   ): Promise<void> {
     const payload = operation.payload;
-    const fileId = operation.fileId ?? stringPayload(payload, "fileId") ?? operation.path;
+    const explicitFileId = operation.fileId ?? stringPayload(payload, "fileId");
+    const fileId = explicitFileId ?? operation.path;
     const path = operation.path ?? stringPayload(payload, "path");
 
     if (!fileId || !path) return;
     await this.assertOperationPreconditions(client, operation, fileId, path);
 
     if (operation.operationType === "delete") {
-      const target = await this.activeFileRecordInClient(
-        client,
-        operation.vaultId,
-        fileId,
-        path,
-      );
+      const target = explicitFileId
+        ? await this.activeFileRecordByFileIdInClient(client, operation.vaultId, fileId)
+        : await this.activeFileRecordInClient(client, operation.vaultId, fileId, path);
       const tombstoneFileId = target?.fileId ?? fileId;
       const tombstonePath = target?.path ?? path;
       const previousSize = target?.sizeBytes ?? 0;
@@ -1020,12 +1018,9 @@ export class SyncRepository {
     }
 
     if (operation.operationType === "rename") {
-      const target = await this.activeFileRecordInClient(
-        client,
-        operation.vaultId,
-        fileId,
-        path,
-      );
+      const target = explicitFileId
+        ? await this.activeFileRecordByFileIdInClient(client, operation.vaultId, fileId)
+        : await this.activeFileRecordInClient(client, operation.vaultId, fileId, path);
       if (!target) return;
 
       const newPath = stringPayload(payload, "newPath") ?? path;
@@ -1461,6 +1456,39 @@ export class SyncRepository {
         limit 1
       `,
       [vaultId, fileId, path],
+    );
+    const row = result.rows[0];
+    if (!row) return undefined;
+    return {
+      fileId: String(row.file_id),
+      path: String(row.path),
+      hash: optionalString(row.hash),
+      sizeBytes: optionalNumber(row.size_bytes) ?? 0,
+      updatedSeq: optionalNumber(row.updated_seq),
+    };
+  }
+
+  private async activeFileRecordByFileIdInClient(
+    client: QueryClient,
+    vaultId: string,
+    fileId: string,
+  ): Promise<{
+    fileId: string;
+    path: string;
+    hash?: string;
+    sizeBytes: number;
+    updatedSeq?: number;
+  } | undefined> {
+    const result = await client.query(
+      `
+        select file_id, path, hash, size_bytes, updated_seq
+        from files
+        where vault_id = $1
+          and file_id = $2
+          and deleted_at is null
+        limit 1
+      `,
+      [vaultId, fileId],
     );
     const row = result.rows[0];
     if (!row) return undefined;
